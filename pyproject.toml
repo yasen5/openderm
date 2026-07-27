@@ -1,0 +1,102 @@
+[project]
+name = "openderm"
+version = "0.1.0"
+description = "Open robotic skin imaging, 3D reconstruction, and longitudinal lesion comparison."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+# Robot control and capture (Raspberry Pis).
+hardware = [
+    "adafruit-circuitpython-ads1x15>=2.4",
+    "fastapi>=0.110",
+    "gpiod>=2.2",
+    "gpiozero>=2.0",
+    "numpy>=1.26",
+    "pydantic>=2.6",
+    "pyserial>=3.5",
+    "smbus2>=0.4.3",
+    "uvicorn>=0.29",
+    "websockets>=12,<14",
+]
+
+# Vision processing (src/skinmap): registration and mole tracking. Runs on the
+# workstation, not the Pis. Install with:  pip install -e ".[vision]"
+vision = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "opencv-python>=4.8",
+    "matplotlib>=3.8",
+]
+
+# Offline collision-envelope generation. Runtime collision checks use NumPy
+# only and do not require the CAD/FCL stack.
+collision = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "trimesh",
+    "yourdfpy",
+    "python-fcl",
+]
+
+[dependency-groups]
+dev = [
+    "pydantic>=2.6",
+    "pytest>=8.3,<9",
+    "ruff==0.15.14",
+]
+
+[project.scripts]
+openderm = "openderm.app.cli:main"
+openderm-canon-capture = "openderm.camera.canon:main"
+openderm-sensors = "openderm.sensors.hg_c:main"
+openderm-limit-switches = "openderm.sensors.limit_switches:main"
+openderm-gantry-server = "openderm.motion.gantry.server:main"
+openderm-rx-axis-server = "openderm.motion.rx_axis.server:main"
+openderm-pico-bridge = "openderm.motion.pico.bridge:main"
+openderm-regulate = "openderm.scanning.regulate:main"
+openderm-scan = "openderm.scanning.cli:main"
+# Vision commands require the [vision] extra.
+openderm-process = "openderm.processing:main"
+openderm-register = "skinmap.register_scan_3d:main"
+openderm-check-ghosts = "skinmap.ghost_check:main"
+openderm-check-doublings = "skinmap.find_doublings:main"
+openderm-compare = "skinmap.compare_scans:main"
+
+[build-system]
+requires = ["setuptools==82.0.1"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+skinmap = ["assets/*"]
+
+[tool.setuptools.data-files]
+"share/openderm/cad" = ["cad/collision_envelope.npz"]
+"share/openderm/pico" = ["pico/gantry_firmware.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
+[tool.uv]
+required-version = "==0.11.16"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F"]
+ignore = [
+    # The scan configuration modules intentionally re-export constants with
+    # ``from .config import *``; names are bounded by config.__all__.
+    "F405",
+]

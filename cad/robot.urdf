@@ -1,0 +1,1613 @@
+<?xml version="1.0" ?>
+<!-- Generated using onshape-to-robot -->
+<!-- Onshape https://cad.onshape.com/documents/f285416369acd45a3486879e/w/edb1aec79d7803a991e7d8fa/e/4ac68e65701966c10da65562 -->
+<robot name="cad">
+  <!-- Link hg_c1030 -->
+  <link name="hg_c1030">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1e-09"/>
+      <inertia ixx="1e-09" ixy="0" ixz="0" iyy="1e-09" iyz="0" izz="1e-09"/>
+    </inertial>
+    <!-- Part hg_c1030 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/hg_c1030.stl"/>
+      </geometry>
+      <material name="hg_c1030_material">
+        <color rgba="0.498039 0.498039 0.498039 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/hg_c1030.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part hg_c1030_2 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/hg_c1030__2.stl"/>
+      </geometry>
+      <material name="hg_c1030_2_material">
+        <color rgba="0.498039 0.498039 0.498039 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/hg_c1030__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_21 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_21.stl"/>
+      </geometry>
+      <material name="part_21_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_21.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_19 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_19.stl"/>
+      </geometry>
+      <material name="part_19_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_19.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_4 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_4.stl"/>
+      </geometry>
+      <material name="part_4_material">
+        <color rgba="0.34902 0.376471 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_4.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_18 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_18.stl"/>
+      </geometry>
+      <material name="part_18_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_18.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1.stl"/>
+      </geometry>
+      <material name="part_1_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_2 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__2.stl"/>
+      </geometry>
+      <material name="part_1_2_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_9 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_9.stl"/>
+      </geometry>
+      <material name="part_9_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_9.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_14 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_14.stl"/>
+      </geometry>
+      <material name="part_14_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_14.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2.stl"/>
+      </geometry>
+      <material name="part_2_material">
+        <color rgba="0.34902 0.376471 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_8 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_8.stl"/>
+      </geometry>
+      <material name="part_8_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_8.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_7 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_7.stl"/>
+      </geometry>
+      <material name="part_7_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_7.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_17 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_17.stl"/>
+      </geometry>
+      <material name="part_17_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_17.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_2 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__2.stl"/>
+      </geometry>
+      <material name="part_2_2_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_12 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_12.stl"/>
+      </geometry>
+      <material name="part_12_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_12.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3 -->
+    <visual>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3.stl"/>
+      </geometry>
+      <material name="part_3_material">
+        <color rgba="0.34902 0.376471 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.230726 0.442303 -0.413714" rpy="-0 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Link part_1 -->
+  <link name="part_1">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1e-09"/>
+      <inertia ixx="1e-09" ixy="0" ixz="0" iyy="1e-09" iyz="0" izz="1e-09"/>
+    </inertial>
+    <!-- Part part_3_2 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__2.stl"/>
+      </geometry>
+      <material name="part_3_2_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_3 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__3.stl"/>
+      </geometry>
+      <material name="part_1_3_material">
+        <color rgba="0.231373 0.380392 0.705882 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__3.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_57 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_57.stl"/>
+      </geometry>
+      <material name="part_57_material">
+        <color rgba="0.34902 0.376471 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_57.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_14_2 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_14__2.stl"/>
+      </geometry>
+      <material name="part_14_2_material">
+        <color rgba="0.768627 0.886275 0.952941 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_14__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_3 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__3.stl"/>
+      </geometry>
+      <material name="part_2_3_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__3.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_4 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__4.stl"/>
+      </geometry>
+      <material name="part_1_4_material">
+        <color rgba="0.498039 0.498039 0.498039 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__4.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3_3 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__3.stl"/>
+      </geometry>
+      <material name="part_3_3_material">
+        <color rgba="0.498039 0.498039 0.498039 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__3.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_5 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__5.stl"/>
+      </geometry>
+      <material name="part_1_5_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__5.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_4 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__4.stl"/>
+      </geometry>
+      <material name="part_2_4_material">
+        <color rgba="0.498039 0.498039 0.498039 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__4.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_6 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__6.stl"/>
+      </geometry>
+      <material name="part_1_6_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__6.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_55 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_55.stl"/>
+      </geometry>
+      <material name="part_55_material">
+        <color rgba="0.34902 0.376471 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_55.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_56 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_56.stl"/>
+      </geometry>
+      <material name="part_56_material">
+        <color rgba="0.34902 0.376471 0.4 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_56.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_7 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__7.stl"/>
+      </geometry>
+      <material name="part_1_7_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__7.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_5 -->
+    <visual>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__5.stl"/>
+      </geometry>
+      <material name="part_2_5_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.464262 0.44135 0.26431" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__5.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Link part_1_2 -->
+  <link name="part_1_2">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1e-09"/>
+      <inertia ixx="1e-09" ixy="0" ixz="0" iyy="1e-09" iyz="0" izz="1e-09"/>
+    </inertial>
+    <!-- Part part_45 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_45.stl"/>
+      </geometry>
+      <material name="part_45_material">
+        <color rgba="0.768627 0.886275 0.952941 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_45.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_16 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_16.stl"/>
+      </geometry>
+      <material name="part_16_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_16.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3_4 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__4.stl"/>
+      </geometry>
+      <material name="part_3_4_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__4.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_11 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_11.stl"/>
+      </geometry>
+      <material name="part_11_material">
+        <color rgba="0.768627 0.886275 0.952941 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_11.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3_5 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__5.stl"/>
+      </geometry>
+      <material name="part_3_5_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__5.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_8 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__8.stl"/>
+      </geometry>
+      <material name="part_1_8_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__8.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_6 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__6.stl"/>
+      </geometry>
+      <material name="part_2_6_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__6.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_9 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__9.stl"/>
+      </geometry>
+      <material name="part_1_9_material">
+        <color rgba="0.701961 0.682353 0.623529 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__9.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_10 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__10.stl"/>
+      </geometry>
+      <material name="part_1_10_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__10.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_11 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__11.stl"/>
+      </geometry>
+      <material name="part_1_11_material">
+        <color rgba="0.917647 0.917647 0.917647 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__11.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_12 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__12.stl"/>
+      </geometry>
+      <material name="part_1_12_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__12.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_10 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_10.stl"/>
+      </geometry>
+      <material name="part_10_material">
+        <color rgba="0.768627 0.886275 0.952941 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_10.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_13 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__13.stl"/>
+      </geometry>
+      <material name="part_1_13_material">
+        <color rgba="0.901961 0.878431 0.811765 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__13.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_17_2 -->
+    <visual>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_17__2.stl"/>
+      </geometry>
+      <material name="part_17_2_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0.41235 0.37635 0.91235" rpy="1.5708 1.5708 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_17__2.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Link part_1_3 -->
+  <link name="part_1_3">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1e-09"/>
+      <inertia ixx="1e-09" ixy="0" ixz="0" iyy="1e-09" iyz="0" izz="1e-09"/>
+    </inertial>
+    <!-- Part part_1_14 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__14.stl"/>
+      </geometry>
+      <material name="part_1_14_material">
+        <color rgba="0.647059 0.647059 0.647059 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__14.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3_6 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__6.stl"/>
+      </geometry>
+      <material name="part_3_6_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__6.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_15 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__15.stl"/>
+      </geometry>
+      <material name="part_1_15_material">
+        <color rgba="0.701961 0.682353 0.623529 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__15.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_16 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__16.stl"/>
+      </geometry>
+      <material name="part_1_16_material">
+        <color rgba="0.901961 0.878431 0.811765 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__16.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_17 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__17.stl"/>
+      </geometry>
+      <material name="part_1_17_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__17.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_18 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__18.stl"/>
+      </geometry>
+      <material name="part_1_18_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__18.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3_7 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__7.stl"/>
+      </geometry>
+      <material name="part_3_7_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__7.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_19 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__19.stl"/>
+      </geometry>
+      <material name="part_1_19_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__19.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_24 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_24.stl"/>
+      </geometry>
+      <material name="part_24_material">
+        <color rgba="0.768627 0.886275 0.952941 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_24.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_57_2 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_57__2.stl"/>
+      </geometry>
+      <material name="part_57_2_material">
+        <color rgba="0.6 0.6 0.6 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_57__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_7 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__7.stl"/>
+      </geometry>
+      <material name="part_2_7_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__7.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_20 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__20.stl"/>
+      </geometry>
+      <material name="part_1_20_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__20.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_21 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__21.stl"/>
+      </geometry>
+      <material name="part_1_21_material">
+        <color rgba="0.901961 0.878431 0.811765 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__21.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_22 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__22.stl"/>
+      </geometry>
+      <material name="part_1_22_material">
+        <color rgba="0.901961 0.878431 0.811765 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__22.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_23 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__23.stl"/>
+      </geometry>
+      <material name="part_1_23_material">
+        <color rgba="0.909804 0.572549 0.164706 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__23.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_12_2 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_12__2.stl"/>
+      </geometry>
+      <material name="part_12_2_material">
+        <color rgba="0.768627 0.886275 0.952941 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_12__2.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_24 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__24.stl"/>
+      </geometry>
+      <material name="part_1_24_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__24.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_2_8 -->
+    <visual>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__8.stl"/>
+      </geometry>
+      <material name="part_2_8_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.9687 -0.5101 0.53817" rpy="3.14159 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_2__8.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Link part_1_4 -->
+  <link name="part_1_4">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="1e-09"/>
+      <inertia ixx="1e-09" ixy="0" ixz="0" iyy="1e-09" iyz="0" izz="1e-09"/>
+    </inertial>
+    <!-- Part part_1_25 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__25.stl"/>
+      </geometry>
+      <material name="part_1_25_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__25.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_104 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_104.stl"/>
+      </geometry>
+      <material name="part_104_material">
+        <color rgba="0.6 0.6 0.6 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_104.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_26 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__26.stl"/>
+      </geometry>
+      <material name="part_1_26_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__26.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_27 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__27.stl"/>
+      </geometry>
+      <material name="part_1_27_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__27.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_28 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__28.stl"/>
+      </geometry>
+      <material name="part_1_28_material">
+        <color rgba="0.647059 0.647059 0.647059 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__28.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_29 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__29.stl"/>
+      </geometry>
+      <material name="part_1_29_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__29.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_54 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_54.stl"/>
+      </geometry>
+      <material name="part_54_material">
+        <color rgba="0.6 0.6 0.6 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_54.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_30 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__30.stl"/>
+      </geometry>
+      <material name="part_1_30_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__30.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_106 -->
+    <visual>
+      <origin xyz="-0.82 1.021 0.716738" rpy="1.5708 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_106.stl"/>
+      </geometry>
+      <material name="part_106_material">
+        <color rgba="0.615686 0.811765 0.929412 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.82 1.021 0.716738" rpy="1.5708 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_106.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_31 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__31.stl"/>
+      </geometry>
+      <material name="part_1_31_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__31.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_32 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__32.stl"/>
+      </geometry>
+      <material name="part_1_32_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__32.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_33 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__33.stl"/>
+      </geometry>
+      <material name="part_1_33_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__33.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_34 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__34.stl"/>
+      </geometry>
+      <material name="part_1_34_material">
+        <color rgba="0.701961 0.682353 0.623529 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__34.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_35 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__35.stl"/>
+      </geometry>
+      <material name="part_1_35_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__35.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_36 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__36.stl"/>
+      </geometry>
+      <material name="part_1_36_material">
+        <color rgba="0.701961 0.682353 0.623529 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__36.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_107 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.756738" rpy="1.5708 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_107.stl"/>
+      </geometry>
+      <material name="part_107_material">
+        <color rgba="0.972549 0.529412 0.00392157 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.756738" rpy="1.5708 -0 0"/>
+      <geometry>
+        <mesh filename="package://assets/part_107.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_37 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__37.stl"/>
+      </geometry>
+      <material name="part_1_37_material">
+        <color rgba="0.901961 0.878431 0.811765 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__37.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_38 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__38.stl"/>
+      </geometry>
+      <material name="part_1_38_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__38.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_39 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__39.stl"/>
+      </geometry>
+      <material name="part_1_39_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__39.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_40 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__40.stl"/>
+      </geometry>
+      <material name="part_1_40_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__40.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_41 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__41.stl"/>
+      </geometry>
+      <material name="part_1_41_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__41.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_105 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_105.stl"/>
+      </geometry>
+      <material name="part_105_material">
+        <color rgba="0.980392 0.713725 0.00392157 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_105.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_42 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__42.stl"/>
+      </geometry>
+      <material name="part_1_42_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__42.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_43 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__43.stl"/>
+      </geometry>
+      <material name="part_1_43_material">
+        <color rgba="0.647059 0.647059 0.647059 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__43.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_44 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__44.stl"/>
+      </geometry>
+      <material name="part_1_44_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__44.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_45 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__45.stl"/>
+      </geometry>
+      <material name="part_1_45_material">
+        <color rgba="0.901961 0.878431 0.811765 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__45.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_46 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__46.stl"/>
+      </geometry>
+      <material name="part_1_46_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__46.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_47 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__47.stl"/>
+      </geometry>
+      <material name="part_1_47_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__47.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_48 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__48.stl"/>
+      </geometry>
+      <material name="part_1_48_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__48.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_3_8 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__8.stl"/>
+      </geometry>
+      <material name="part_3_8_material">
+        <color rgba="0.262745 0.282353 0.301961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_3__8.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_49 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__49.stl"/>
+      </geometry>
+      <material name="part_1_49_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__49.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_50 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__50.stl"/>
+      </geometry>
+      <material name="part_1_50_material">
+        <color rgba="0.901961 0.901961 0.901961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__50.stl"/>
+      </geometry>
+    </collision>
+    <!-- Part part_1_51 -->
+    <visual>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__51.stl"/>
+      </geometry>
+      <material name="part_1_51_material">
+        <color rgba="0.701961 0.701961 0.701961 1"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="-0.845 1.021 0.716738" rpy="1.5708 -0 -0"/>
+      <geometry>
+        <mesh filename="package://assets/part_1__51.stl"/>
+      </geometry>
+    </collision>
+  </link>
+  <!-- Joint from part_1_3 to part_1_4 -->
+  <joint name="x" type="prismatic">
+    <origin xyz="-0.1237 -0.02975 -0.48283" rpy="1.5708 -0 0"/>
+    <parent link="part_1_3"/>
+    <child link="part_1_4"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-0.594238" upper="0.225262"/>
+  </joint>
+  <!-- Joint from part_1_2 to part_1_3 -->
+  <joint name="y" type="prismatic">
+    <origin xyz="-0.09775 -0.1 -0.05635" rpy="-1.5708 1.5708 0"/>
+    <parent link="part_1_2"/>
+    <child link="part_1_3"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-0.37077" upper="0.30983"/>
+  </joint>
+  <!-- Joint from part_1 to part_1_2 -->
+  <joint name="z" type="prismatic">
+    <origin xyz="0.296088 0.065 -0.14804" rpy="-0 -1.5708 0"/>
+    <parent link="part_1"/>
+    <child link="part_1_2"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-0.4065" upper="0"/>
+  </joint>
+  <!-- Joint from hg_c1030 to part_1 -->
+  <joint name="rx" type="revolute">
+    <origin xyz="0.233537 0.177993 0.027636" rpy="-1.5708 -0 -0"/>
+    <parent link="hg_c1030"/>
+    <child link="part_1"/>
+    <axis xyz="0 0 1"/>
+    <limit effort="10" velocity="10" lower="-0.959931" upper="0.959931"/>
+  </joint>
+</robot>

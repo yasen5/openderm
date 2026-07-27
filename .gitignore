@@ -1,0 +1,27 @@
+.DS_Store
+datasheets/*
+.env
+*.env
+!*.env.example
+.venv/
+**/__pycache__/*
+*.bin
+*.pyc
+**/*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+build/
+captures/
+logs/
+dist/
+*.egg-info/
+# local calibration virtualenv
+.venv-calib/
+
+.claude/worktrees/
