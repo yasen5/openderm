@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fit the rx-pivot arc from a set of poses that all view the same fixed point.
+r"""Fit the rx-pivot arc from a set of poses that all view the same fixed point.
 
 Feed it a ``captures/rx_pivot_poses_*.jsonl`` file collected with
 ``src/scripts/calibration/rx_pivot_capture.py``. Each recorded pose must view the
@@ -15,7 +15,8 @@ beyond it.
 
 Run with a numpy-capable interpreter, e.g. the calibration venv::
 
-    python src/scripts/calibration/rx_pivot_fit.py captures/rx_pivot_poses_<timestamp>.jsonl
+    python src/scripts/calibration/rx_pivot_fit.py captures/rx_pivot_poses.jsonl \
+        --out captures/rx_pivot_model.json
 """
 
 from __future__ import annotations
@@ -40,8 +41,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--out",
-        default=None,
-        help="Where to write the model JSON (default: captures/rx_pivot_model.json).",
+        required=True,
+        type=Path,
+        help="Where to write this run's model JSON.",
     )
     return parser
 
@@ -77,7 +79,7 @@ def main() -> int:
     )
     print(f"\nverdict: {verdict}")
 
-    out = Path(args.out) if args.out else REPO_ROOT / "captures" / "rx_pivot_model.json"
+    out = args.out
     out.parent.mkdir(parents=True, exist_ok=True)
     model.save(out)
     print(f"\nwrote model -> {out}")

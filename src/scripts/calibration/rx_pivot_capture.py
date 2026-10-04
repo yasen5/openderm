@@ -16,16 +16,16 @@ the same time; each reading lights one, reads it, and turns it off.
 
 SAFETY: X/Y jogs move before Z re-regulates. Over a rising surface, a large jog
 can drive the head into the target. Use an inert target and keep
-``--jog-step-mm`` small relative to surface variation.
+`jog_step_mm` in config/scripts.json small relative to surface variation.
 
 X is controlled by Klipper. Y and Z are controlled by one Raspberry Pi Pico
-over the shared serial connection selected with ``--pico-port``. Pass
-``--home-y``/``--home-z`` to home the Pico axes at startup.
+over the shared serial connection in config/scripts.json. That file also
+controls whether to home the Pico axes at startup.
 
 Requirements:
   - `openderm-gantry-server` is running on Pi #1 with X homed.
-  - The Pico firmware is reachable on --pico-port with Y/Z homed (use
-    --home-y/--home-z or ``openderm --axis y|z home``).
+  - The Pico firmware is reachable at the configured port with Y/Z homed
+    (configure home_y/home_z or use ``openderm --axis y|z home``).
   - The RX-axis server is running and rx homed.
   - Run on the host that owns the ADS1115 + sensor enable GPIOs (Pi #2).
   - A TTY-attached keyboard (run it in a real terminal, not a pipe).
@@ -53,27 +53,13 @@ from openderm.motion.gantry.server import (
     GantryServerClient,
     GantryServerError,
 )
-from openderm.config import default_pico_port
+from openderm.script_config import calibration_options
 from openderm.motion.rx_axis.server import (
     RxAxisServerClient,
     RxAxisServerError,
 )
 from openderm.sensors.hg_c import build_sensor_controller
 
-
-DEFAULT_SERVER_URL = os.getenv("GANTRY_SERVER_URL", "http://openderm-gantry.local:8090")
-DEFAULT_RX_SERVER_URL = os.getenv("RX_AXIS_SERVER_URL", "http://127.0.0.1:8091")
-
-DEFAULT_TARGET_MM = 110.0
-DEFAULT_JOG_STEP_MM = 1.0
-DEFAULT_GAIN_MM_PER_MM = 0.5
-DEFAULT_MAX_STEP_MM = 2.0
-DEFAULT_SEARCH_STEP_MM = 2.0
-DEFAULT_DEADBAND_MM = 0.5
-DEFAULT_PERIOD_S = 0.1
-DEFAULT_SAMPLES = 5
-# Default max speed (mm/s) for a Pico-backed Y or Z axis (applied as the firmware VMAX).
-DEFAULT_PICO_VMAX_MM_S = 35.0
 
 ARROW_PREFIX = "\x1b"
 
@@ -109,12 +95,7 @@ class _PivotCaptureWorkflow:
         self.on_target = 0
         self.last_report = time.monotonic()
         self.record_count = 0
-        self.record_path = (
-            Path(args.record_file)
-            if args.record_file
-            else Path("captures")
-            / f"rx_pivot_poses_{datetime.now().strftime('%Y%m%d-%H%M%S')}.jsonl"
-        )
+        self.record_path = Path(args.record_file)
 
     @staticmethod
     def emit(message: str) -> None:
@@ -139,7 +120,6 @@ class _PivotCaptureWorkflow:
             axis,
             delta_mm,
             feed_mm_min=(self.args.feed_mm_min if axis == "z" else self.args.xy_feed_mm_min),
-            tolerance_mm=self.args.tolerance_mm if axis == "z" else None,
             prefer_move_by=axis == "x",
         )
 
@@ -406,8 +386,12 @@ def _connect_session(args: argparse.Namespace) -> CalibrationSession | None:
 
 
 def run(args: argparse.Namespace) -> int:
-    if args.jog_step_mm <= 0:
-        print("--jog-step-mm must be > 0.", file=sys.stderr)
+    try:
+        args = calibration_options("rx_pivot_capture", args)
+        if not math.isfinite(args.target_rx):
+            raise ValueError("target_rx must be finite.")
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
         return 1
     if not sys.stdin.isatty():
         print(
@@ -428,167 +412,20 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Record fixed-point poses across RX angles for the pivot model while "
-            "regulating Z standoff and allowing small X/Y alignment jogs."
+            "Record fixed-point poses across RX angles. Persistent settings "
+            "are loaded from config/scripts.json."
         )
     )
     parser.add_argument(
-        "target_rx", type=float, help="Target rx angle (radians, or degrees with --degrees)."
-    )
-    parser.add_argument(
-        "--degrees",
-        action="store_true",
-        help="Interpret target_rx (and --rx-speed) inputs as degrees.",
-    )
-
-    parser.add_argument(
-        "--target-mm",
+        "target_rx",
         type=float,
-        default=DEFAULT_TARGET_MM,
-        help="Constant sensor-average standoff target in mm (default %(default)s).",
-    )
-    parser.add_argument(
-        "--jog-step-mm",
-        type=float,
-        default=DEFAULT_JOG_STEP_MM,
-        help="Initial X/Y jog step in mm per keypress (default %(default)s).",
+        help="Initial RX angle (radians, or degrees when configured in scripts.json).",
     )
     parser.add_argument(
         "--record-file",
-        default=None,
-        help=(
-            "JSONL file to append recorded poses to "
-            "(default: captures/rx_pivot_poses_<timestamp>.jsonl)."
-        ),
-    )
-
-    # --- z regulation ---
-    parser.add_argument(
-        "--gain-mm-per-mm",
-        type=float,
-        default=DEFAULT_GAIN_MM_PER_MM,
-        help="z proportional gain: z step = gain*(avg-target) (default %(default)s).",
-    )
-    parser.add_argument(
-        "--max-step-mm",
-        type=float,
-        default=DEFAULT_MAX_STEP_MM,
-        help="Max per-iteration z move in mm while in range (default %(default)s).",
-    )
-    parser.add_argument(
-        "--search-step-mm",
-        type=float,
-        default=DEFAULT_SEARCH_STEP_MM,
-        help="Fixed z step in mm while both sensors are out of range (default %(default)s).",
-    )
-    parser.add_argument(
-        "--deadband-mm",
-        type=float,
-        default=DEFAULT_DEADBAND_MM,
-        help="Average-error magnitude (mm) treated as on-target (default %(default)s).",
-    )
-    parser.add_argument(
-        "--period-s",
-        type=float,
-        default=DEFAULT_PERIOD_S,
-        help="Control/keyboard loop period in seconds (default %(default)s).",
-    )
-    parser.add_argument(
-        "--samples",
-        type=int,
-        default=DEFAULT_SAMPLES,
-        help="ADC samples to average per sensor reading (default %(default)s).",
-    )
-    parser.add_argument(
-        "--report-interval-s",
-        type=float,
-        default=0.25,
-        help="How often to refresh the status line (default %(default)s).",
-    )
-
-    # --- move speeds / tolerances ---
-    parser.add_argument(
-        "--feed-mm-min",
-        type=float,
-        default=None,
-        help="Feed rate in mm/min for z moves (default: server default).",
-    )
-    parser.add_argument(
-        "--xy-feed-mm-min",
-        type=float,
-        default=None,
-        help="Feed rate in mm/min for x/y jogs (default: server default).",
-    )
-    parser.add_argument(
-        "--tolerance-mm",
-        type=float,
-        default=None,
-        help="Position tolerance for a blocking z move (default: server default).",
-    )
-    parser.add_argument(
-        "--rx-speed-rad-s",
-        type=float,
-        default=None,
-        help="Speed in rad/s for the rx move (default: RX-axis server default).",
-    )
-
-    # --- servers ---
-    parser.add_argument(
-        "--gantry-server-url",
-        default=DEFAULT_SERVER_URL,
-        help="Base URL of the gantry server on Pi #1 (default %(default)s).",
-    )
-    parser.add_argument(
-        "--rx-server-url",
-        default=DEFAULT_RX_SERVER_URL,
-        help="Base URL of the RX-axis server controlling rx (default %(default)s).",
-    )
-
-    # --- Pico Y/Z controller ---
-    parser.add_argument(
-        "--pico-port",
-        default=default_pico_port(),
-        help=(
-            "Pico serial port shared by Y and Z. A "
-            "local device (/dev/ttyACM0) OR a pyserial URL if the Pico is on another host "
-            "bridged over the network, e.g. socket://<pi1-ip>:8095 (served by "
-            "openderm-pico-bridge). "
-            "Defaults to PICO_PORT or the bridge derived from GANTRY_SERVER_URL."
-        ),
-    )
-    parser.add_argument(
-        "--y-pico-vmax-mm-s",
-        type=float,
-        default=DEFAULT_PICO_VMAX_MM_S,
-        help="Y max speed (mm/s) for the Pico (default %(default)s).",
-    )
-    parser.add_argument(
-        "--y-pico-acc-mm-s2",
-        type=float,
-        default=None,
-        help="Y acceleration (mm/s^2) for the Pico (default: firmware ACC).",
-    )
-    parser.add_argument(
-        "--z-pico-vmax-mm-s",
-        type=float,
-        default=DEFAULT_PICO_VMAX_MM_S,
-        help="Z max speed (mm/s) for the Pico (default %(default)s).",
-    )
-    parser.add_argument(
-        "--z-pico-acc-mm-s2",
-        type=float,
-        default=None,
-        help="Z acceleration (mm/s^2) for the Pico (default: firmware ACC).",
-    )
-    parser.add_argument(
-        "--home-y",
-        action="store_true",
-        help="Home the Y axis on the Pico before starting.",
-    )
-    parser.add_argument(
-        "--home-z",
-        action="store_true",
-        help="Home the Z axis on the Pico before starting.",
+        required=True,
+        type=Path,
+        help="JSONL file to append this run's poses to.",
     )
     return parser
 

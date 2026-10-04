@@ -17,6 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 import floor_depth_tare as fdt
+from openderm import script_config
 from contour_fake_world import (
     TARGET_MM,
     Z_AT_TARGET,
@@ -27,28 +28,33 @@ from contour_fake_world import (
 )
 
 
-def _run_tare(world, extra_args=None):
-    fdt.RxAxisServerClient = lambda url, *, timeout_s=5.0: FakeRxAxisClient(world)
-    fdt.build_sensor_controller = lambda: FakeController(world)
+def _run_tare(world, *, sweep=None, settings=None):
     import openderm.motion.pico.adapter as pico_mod
 
     class FakeLink:
         def close(self):
             pass
 
+    config = json.loads(script_config.CONFIG_PATH.read_text())
+    config["calibration"].update(target_mm=TARGET_MM, period_s=0)
+    config["floor_depth_tare"].update(settle_iters=3, tare_samples=5)
+    for section, values in (settings or {}).items():
+        config[section].update(values)
     with tempfile.TemporaryDirectory() as d:
         out = Path(d) / "floor_depth.json"
+        config_path = Path(d) / "scripts.json"
+        config_path.write_text(json.dumps(config))
         args = fdt.build_parser().parse_args(
-            [
-                f"--target-mm={TARGET_MM}",
-                "--period-s=0",
-                "--settle-iters=3",
-                "--tare-samples=5",
-                f"--out={out}",
-                *(extra_args or []),
-            ]
+            [*(["sweep", sweep] if sweep else ["point"]), "--out", str(out)]
         )
         with (
+            mock.patch.object(script_config, "CONFIG_PATH", config_path),
+            mock.patch.object(
+                fdt,
+                "RxAxisServerClient",
+                side_effect=lambda url, *, timeout_s: FakeRxAxisClient(world),
+            ),
+            mock.patch.object(fdt, "build_sensor_controller", return_value=FakeController(world)),
             mock.patch.object(pico_mod, "open_pico_link", return_value=FakeLink()),
             mock.patch.object(
                 pico_mod,
@@ -62,7 +68,7 @@ def _run_tare(world, extra_args=None):
 
 
 class FloorDepthTareSweepTests(unittest.TestCase):
-    """--rx-sweep: sample the bed at several rx angles and fit z+d vs rx.
+    """Sweep mode: sample the bed at several rx angles and fit z+d vs rx.
 
     World: no body under the head. The fake sensor models beam obliquity, so
     z+d varies smoothly and nonlinearly with RX; the quadratic floor model must
@@ -76,7 +82,8 @@ class FloorDepthTareSweepTests(unittest.TestCase):
         )
         rc, payload = _run_tare(
             world,
-            ["--rx-sweep=0.10:1.20:6", "--target-mm=120", "--timeout-s=5"],
+            sweep="0.10:1.20:6",
+            settings={"calibration": {"target_mm": 120}, "floor_depth_tare": {"timeout_s": 5}},
         )
         self.assertEqual(rc, 0)
         self.assertIsNotNone(payload)
@@ -107,7 +114,8 @@ class FloorDepthTareSweepTests(unittest.TestCase):
         )
         rc, payload = _run_tare(
             world,
-            ["--rx-sweep=0.35:1.5:6", "--target-mm=120", "--timeout-s=2"],
+            sweep="0.35:1.5:6",
+            settings={"calibration": {"target_mm": 120}, "floor_depth_tare": {"timeout_s": 2}},
         )
         self.assertEqual(rc, 0)  # partial success, loudly warned -- not an abort
         self.assertEqual(len(payload["samples"]), 1)
@@ -133,9 +141,9 @@ class FloorDepthTareTests(unittest.TestCase):
 
     def test_tare_aborts_when_no_surface_within_travel_bound(self) -> None:
         # No body anywhere near: every read is below_range, the bounded search
-        # descends and must ABORT at --max-travel-mm, not hunt forever.
+        # descends and must ABORT at the configured max_travel_mm, not hunt forever.
         world = FakeWorld(body={0.0: (500.0, 600.0)})  # far away in y: never hit
-        rc, payload = _run_tare(world, ["--max-travel-mm=20"])
+        rc, payload = _run_tare(world, settings={"floor_depth_tare": {"max_travel_mm": 20}})
         self.assertEqual(rc, 1)
         self.assertIsNone(payload)
         # z never descended past the bound (start 300 + 20 + one step slack).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tare the bed/floor absolute depth for the scanner's --floor-depth-mm filter.
+r"""Tare the bed/floor absolute depth for the scanner's --floor-depth-mm filter.
 
 The scanner can reject sensor readings of the bed by their absolute depth: the
 bed is at a fixed machine height, so gantry z + sensor distance is approximately
@@ -8,13 +8,13 @@ measures that reference.
 
 Two modes:
 
-SINGLE-POINT (default). You park the head over BARE BED (no body part under the
+SINGLE-POINT (point). You park the head over BARE BED (no body part under the
 lasers) at a tilt representative of scanning, the script regulates z so the
-sensor average sits at --target-mm (scan-like geometry), then medians
---tare-samples rounds of z + d per sensor. RX is NOT moved; the current angle is
-only recorded. Pass the printed value to the scans as --floor-depth-mm.
+sensor average sits at the configured target_mm (scan-like geometry), then takes
+the median of tare_samples rounds of z + d per sensor. RX is NOT moved; the
+current angle is only recorded. Pass the value to scans as --floor-depth-mm.
 
-RX SWEEP (--rx-sweep lo:hi:N, e.g. 0.35:1.5:6). The sensor distance is measured
+RX SWEEP (sweep lo:hi:N, e.g. 0.35:1.5:6). The sensor distance is measured
 along the BEAM, so the bed's z+d drifts with the tilt (path obliquity + the
 sensor origin riding the rx lever arm) -- tens of mm across a wide working range,
 more than the scans' --floor-margin-mm. The sweep steps rx through N angles,
@@ -23,37 +23,38 @@ re-settles z and takes a single-point tare AT EACH, then least-squares fits
 over the reachable samples and stores the fit in the output JSON. Point the
 scans at that file with --floor-model captures/floor_depth.json and the
 rejection threshold follows the live rx. A sample where z cannot reach the
-standoff (the bed drops out of z travel as the tilt steepens -- holding
---target-mm along a steeper beam needs a DEEPER z) is SKIPPED with a warning and
-the fit covers the reachable range; the scans clamp rx into that range when
+standoff (the bed drops out of z travel as the tilt steepens -- holding the
+configured target_mm along a steeper beam needs a DEEPER z) is SKIPPED with a
+warning and the fit covers the reachable range; scans clamp rx into that range when
 evaluating (steeper tilts read the bed even deeper, so clamping errs toward
 rejection). Fewer than 3 reachable samples -> no fit, constant fallback.
 
 The Z regulator is bounded for calibration: a crash-imminent ``above_range`` on
-either sensor retreats Z, search travel is limited by ``--max-travel-mm`` per
-sample, and every settle is limited by ``--timeout-s``.
+either sensor retreats Z, search travel is limited by ``max_travel_mm`` per
+sample, and every settle is limited by the configured timeout_s.
 
 Run on the host that owns the sensors (Pi 2), with Pico Z homed. The RX-axis
-server is required for --rx-sweep (it commands rx
+server is required for sweep mode (it commands rx
 over the bare bed; make sure the swept range is clear) and optional otherwise
 (only records the tilt).
 
+Settings, including target_mm and bounded search travel/time, are loaded from
+config/scripts.json. RX sweep angles are always radians.
+
 Typical use:
-  python src/scripts/calibration/floor_depth_tare.py \
-      --pico-port socket://openderm-gantry.local:8095 \
-      --target-mm 120 --rx-sweep 0.35:1.5:6
+  python src/scripts/calibration/floor_depth_tare.py sweep 0.35:1.5:6 \
+      --out captures/floor_depth.json
 then scan with:
   --floor-model captures/floor_depth.json --floor-margin-mm 10
-keeping the margin below the body's thickness-above-bed at the edges. (Taring at
---target-mm 120 while scanning at 110 is fine: z+d is a property of the bed, not
-the standoff; the second-order error is a few mm at the steepest tilts.)
+keeping the margin below the body's thickness-above-bed at the edges.
+
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
+import math
 import statistics
 import sys
 import time
@@ -64,33 +65,12 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from openderm.calibration import AxisSetup, CalibrationSession
+from openderm.script_config import calibration_options
 from openderm.motion.rx_axis.server import (
     RxAxisServerClient,
     RxAxisServerError,
 )
 from openderm.sensors.hg_c import build_sensor_controller
-
-
-DEFAULT_RX_SERVER_URL = os.getenv("RX_AXIS_SERVER_URL", "http://127.0.0.1:8091")
-# Regulation defaults match openderm-regulate and openderm-scan.
-DEFAULT_TARGET_MM = 110.0
-DEFAULT_GAIN_MM_PER_MM = 0.5
-DEFAULT_MAX_STEP_MM = 2.0
-DEFAULT_SEARCH_STEP_MM = 2.0
-DEFAULT_DEADBAND_MM = 0.5
-DEFAULT_PERIOD_S = 0.1
-DEFAULT_SAMPLES = 5
-DEFAULT_SETTLE_ITERS = 5
-# Tare bounds. The head is parked near the bed by hand, so the floor should be
-# found within a short travel; a larger excursion means the head is NOT over
-# bare bed (or the pose is wrong) -- abort/skip rather than hunt.
-DEFAULT_MAX_TRAVEL_MM = 80.0
-DEFAULT_TIMEOUT_S = 60.0
-DEFAULT_TARE_SAMPLES = 10
-DEFAULT_RX_SPEED_RAD_S = 0.1
-DEFAULT_RX_ACCEL_RAD_S2: float | None = None
-DEFAULT_RX_SETTLE_TOL_RAD = 0.01
-DEFAULT_OUT = str(REPO_ROOT / "captures" / "floor_depth.json")
 
 
 def _clamp(value: float, limit: float) -> float:
@@ -103,11 +83,11 @@ def _parse_rx_sweep(spec: str) -> list[float]:
         lo_s, hi_s, n_s = spec.split(":")
         lo, hi, n = float(lo_s), float(hi_s), int(n_s)
     except ValueError as exc:
-        raise ValueError(f"--rx-sweep must be lo:hi:N (rad:rad:count), got {spec!r}") from exc
+        raise ValueError(f"rx_sweep must be lo:hi:N (rad:rad:count), got {spec!r}") from exc
     if n < 2:
-        raise ValueError("--rx-sweep needs N >= 2 sample points")
-    if hi <= lo:
-        raise ValueError("--rx-sweep needs hi > lo")
+        raise ValueError("rx_sweep needs N >= 2 sample points")
+    if not math.isfinite(lo) or not math.isfinite(hi) or hi <= lo:
+        raise ValueError("rx_sweep needs finite angles with hi > lo")
     return [lo + i * (hi - lo) / (n - 1) for i in range(n)]
 
 
@@ -172,7 +152,6 @@ class _FloorTareWorkflow:
             "z",
             delta_mm,
             feed_mm_min=self.args.feed_mm_min,
-            tolerance_mm=self.args.tolerance_mm,
         )
 
     def _read_pair(self):
@@ -293,10 +272,10 @@ class _FloorTareWorkflow:
             reason = {
                 "z-limit": "z move rejected (bed beyond z travel at this target?)",
                 "travel": (
-                    f"z moved > --max-travel-mm {self.args.max_travel_mm:.0f}mm "
+                    f"z moved > max_travel_mm {self.args.max_travel_mm:.0f}mm "
                     "without settling -- is the head really over bare bed?"
                 ),
-                "timeout": (f"did not settle within --timeout-s {self.args.timeout_s:.0f}s"),
+                "timeout": (f"did not settle within timeout_s {self.args.timeout_s:.0f}s"),
             }[status]
             print(f"Aborting tare: {reason}.", file=sys.stderr)
             return None
@@ -479,13 +458,7 @@ class _FloorTareWorkflow:
 
 
 def _validate_args(args: argparse.Namespace) -> list[float] | None:
-    if args.settle_iters < 1:
-        raise ValueError("--settle-iters must be at least 1.")
-    if args.tare_samples < 3:
-        raise ValueError("--tare-samples must be at least 3 (median needs a few).")
-    if args.max_travel_mm <= 0:
-        raise ValueError("--max-travel-mm must be positive.")
-    return _parse_rx_sweep(args.rx_sweep) if args.rx_sweep else None
+    return _parse_rx_sweep(args.rx_sweep) if args.mode == "sweep" else None
 
 
 def _connect_session(
@@ -513,7 +486,8 @@ def _connect_session(
         print(f"Pico link up (Z) on {args.pico_port}.", file=sys.stderr)
         if not session.is_homed("z"):
             print(
-                "z-axis is not homed. Re-run with --home-z, or home it first.",
+                "z-axis is not homed. Set floor_depth_tare.home_z in "
+                "config/scripts.json, or home it first.",
                 file=sys.stderr,
             )
             session.close()
@@ -535,7 +509,7 @@ def _connect_session(
         session.rx = None
         if sweep_targets is not None:
             print(
-                f"--rx-sweep needs the RX-axis server at {args.rx_server_url}: {exc}",
+                f"Sweep mode needs the RX-axis server at {args.rx_server_url}: {exc}",
                 file=sys.stderr,
             )
             session.close()
@@ -553,6 +527,7 @@ def _connect_session(
 
 def run(args: argparse.Namespace) -> int:
     try:
+        args = calibration_options("floor_depth_tare", args)
         sweep_targets = _validate_args(args)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
@@ -576,177 +551,20 @@ def run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Measure the bed/floor absolute depth (gantry z + sensor distance) for "
-            "the contour scans' floor-rejection filter: park the head over BARE "
-            "BED, and this regulates z to the target standoff on the bed, samples "
-            "both sensors, and records the median z + d -- at the current tilt "
-            "(default), or swept over an rx range and fitted (--rx-sweep) for the "
-            "scans' --floor-model rx-dependent threshold."
+            "Measure bed/floor absolute depth over bare bed. Persistent settings "
+            "are loaded from config/scripts.json."
         )
     )
-    parser.add_argument(
-        "--pico-port",
-        default=os.getenv("PICO_PORT", "/dev/ttyACM0"),
-        help=(
-            "Pico serial port for Z: a local device or a pyserial URL "
-            "(e.g. socket://<pi1-ip>:8095). Defaults to PICO_PORT or /dev/ttyACM0."
-        ),
-    )
-    parser.add_argument(
-        "--pico-vmax-mm-s",
-        type=float,
-        default=None,
-        help="Z max speed (mm/s) for the Pico (default: firmware VMAX).",
-    )
-    parser.add_argument(
-        "--pico-acc-mm-s2",
-        type=float,
-        default=None,
-        help="Z acceleration (mm/s^2) for the Pico (default: firmware ACC).",
-    )
-    parser.add_argument(
-        "--home-z",
-        action="store_true",
-        help="Home Z on the Pico before taring.",
-    )
-    parser.add_argument(
-        "--rx-server-url",
-        default=DEFAULT_RX_SERVER_URL,
-        help=(
-            "RX-axis server URL (default from RX_AXIS_SERVER_URL or "
-            "%(default)s). REQUIRED (rx homed) for "
-            "--rx-sweep; otherwise only used to record the tare's tilt "
-            "(unreachable tolerated)."
-        ),
-    )
-    parser.add_argument(
-        "--rx-sweep",
-        default=None,
+    modes = parser.add_subparsers(dest="mode", required=True)
+    point = modes.add_parser("point", help="Tare at the current RX angle without moving RX.")
+    sweep = modes.add_parser("sweep", help="Tare across an RX range and fit a floor model.")
+    sweep.add_argument(
+        "rx_sweep",
         metavar="LO:HI:N",
-        help=(
-            "Sweep mode: sample the floor depth at N rx angles from LO to HI rad "
-            "(e.g. 0.35:1.5:6), settle z at each, and fit z+d = c0 + c1*rx + "
-            "c2*rx^2 for the scans' --floor-model. Angles the bed cannot be "
-            "reached at (z travel) are skipped and the fit covers the reachable "
-            "range. The head MUST be over bare bed for the whole swept range. "
-            "Default: off (single point at the current rx, which is never moved)."
-        ),
+        help="Sample N RX angles from LO to HI radians, e.g. 0.35:1.5:6.",
     )
-    parser.add_argument(
-        "--rx-speed-rad-s",
-        type=float,
-        default=DEFAULT_RX_SPEED_RAD_S,
-        help="Speed for sweep rx moves (default %(default)s).",
-    )
-    parser.add_argument(
-        "--rx-accel-rad-s2",
-        type=float,
-        default=DEFAULT_RX_ACCEL_RAD_S2,
-        help="Max acceleration for sweep rx moves (default: RX-axis server default).",
-    )
-    parser.add_argument(
-        "--rx-settle-tol-rad",
-        type=float,
-        default=DEFAULT_RX_SETTLE_TOL_RAD,
-        help="Arrival tolerance for sweep rx moves (default %(default)s).",
-    )
-    parser.add_argument(
-        "--target-mm",
-        type=float,
-        default=DEFAULT_TARGET_MM,
-        help=(
-            "Standoff to settle at on the bed before taring (default %(default)s). "
-            "Use a scan-like value; taring at e.g. 120 for a scan run at 110 is "
-            "fine (z+d is a property of the bed -- the second-order error is a few "
-            "mm at the steepest tilts)."
-        ),
-    )
-    parser.add_argument(
-        "--gain-mm-per-mm",
-        type=float,
-        default=DEFAULT_GAIN_MM_PER_MM,
-        help="Proportional z gain (default %(default)s).",
-    )
-    parser.add_argument(
-        "--max-step-mm",
-        type=float,
-        default=DEFAULT_MAX_STEP_MM,
-        help="Maximum per-iteration z move in mm (default %(default)s).",
-    )
-    parser.add_argument(
-        "--search-step-mm",
-        type=float,
-        default=DEFAULT_SEARCH_STEP_MM,
-        help="Fixed descent step while both sensors read below range (default %(default)s).",
-    )
-    parser.add_argument(
-        "--deadband-mm",
-        type=float,
-        default=DEFAULT_DEADBAND_MM,
-        help="Average-error magnitude treated as on-target (default %(default)s).",
-    )
-    parser.add_argument(
-        "--settle-iters",
-        type=int,
-        default=DEFAULT_SETTLE_ITERS,
-        help="Consecutive in-deadband reads required before taring (default %(default)s).",
-    )
-    parser.add_argument(
-        "--tare-samples",
-        type=int,
-        default=DEFAULT_TARE_SAMPLES,
-        help="Measurement rounds per point; the median is used (default %(default)s).",
-    )
-    parser.add_argument(
-        "--max-travel-mm",
-        type=float,
-        default=DEFAULT_MAX_TRAVEL_MM,
-        help=(
-            "Skip/abort if z moves farther than this from a settle's starting "
-            "position without settling (default %(default)s) -- the head should be "
-            "parked NEAR the bed, so a long hunt means a wrong pose."
-        ),
-    )
-    parser.add_argument(
-        "--timeout-s",
-        type=float,
-        default=DEFAULT_TIMEOUT_S,
-        help="Per-settle timeout (default %(default)s).",
-    )
-    parser.add_argument(
-        "--period-s",
-        type=float,
-        default=DEFAULT_PERIOD_S,
-        help="Control loop period in seconds (default %(default)s).",
-    )
-    parser.add_argument(
-        "--samples",
-        type=int,
-        default=DEFAULT_SAMPLES,
-        help="ADC samples to average per sensor reading (default %(default)s).",
-    )
-    parser.add_argument(
-        "--feed-mm-min",
-        type=float,
-        default=None,
-        help="Feed rate in mm/min for z moves (default: server default).",
-    )
-    parser.add_argument(
-        "--tolerance-mm",
-        type=float,
-        default=None,
-        help="Position tolerance for blocking z moves (default: server default).",
-    )
-    parser.add_argument(
-        "--out",
-        default=DEFAULT_OUT,
-        help="Where to write the tare JSON (default %(default)s).",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Print per-loop controller decisions.",
-    )
+    for mode in (point, sweep):
+        mode.add_argument("--out", required=True, type=Path, help="Where to write the tare JSON.")
     return parser
 
 

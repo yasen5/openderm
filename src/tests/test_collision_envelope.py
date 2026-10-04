@@ -10,6 +10,7 @@ import numpy as np
 
 import build_collision_envelope as builder
 from openderm.motion.collision_guard import CollisionGuard
+from openderm.script_config import CollisionConfig, load_script_config
 
 
 class CollisionEnvelopeTests(unittest.TestCase):
@@ -29,13 +30,9 @@ class CollisionEnvelopeTests(unittest.TestCase):
                 clearance=clearance,
             )
 
-            old_grid, old_envelope = builder.GRID, builder.ENV
-            builder.GRID, builder.ENV = str(grid), str(envelope)
-            try:
-                with contextlib.redirect_stdout(io.StringIO()):
-                    builder.derive(margin=20.0, backlash_deg=2.5)
-            finally:
-                builder.GRID, builder.ENV = old_grid, old_envelope
+            settings = CollisionConfig(**load_script_config("collision"))
+            with contextlib.redirect_stdout(io.StringIO()):
+                builder.derive(grid, envelope, settings)
 
             guard = CollisionGuard.load(str(envelope))
             self.assertTrue(guard.is_safe(0.5, 0.5, 0.5, 0.5))

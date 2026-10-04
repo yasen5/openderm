@@ -1,69 +1,77 @@
-"""Precompute the self-collision-free envelope for the gantry.
+r"""Precompute the self-collision-free envelope for the gantry.
 
-  sweep : python src/scripts/collision/build_collision_envelope.py sweep
-  derive: python src/scripts/collision/build_collision_envelope.py derive <margin_mm> <backlash_deg>
+  sweep : python src/scripts/collision/build_collision_envelope.py sweep \
+              --grid config/cad/collision_clearance.npz --out config/cad/collision_envelope.npz
+  derive: python src/scripts/collision/build_collision_envelope.py derive \
+              --grid config/cad/collision_clearance.npz --out config/cad/collision_envelope.npz
 
-`sweep` computes the raw min-clearance grid over (rx,z,x,y) in REAL controller units
-(mm for x/y/z, rad for rx) via the FCL collision model and saves it (slow, ~10 min).
-`derive` is instant: it re-thresholds that saved grid at a chosen margin + rx-backlash
-into the safe (x,y) masks. rx is interpolated to a fine grid so a small backlash is
-honored despite the coarse sweep.
+`sweep` computes the raw min-clearance grid over (rx,z,x,y) in REAL controller
+units (mm for x/y/z, rad for rx) via the FCL model, saves it, and derives the
+safe envelope. `derive` re-thresholds a saved grid without repeating the sweep.
 
-Writes: config/cad/collision_clearance.npz (grid), config/cad/collision_envelope.npz (safe masks).
+Persistent settings come from config/scripts.json. Travel ranges come from
+config/cad/frame_calibration.json. RX is interpolated to a fine grid so small
+backlash is honored despite the coarse sweep.
 """
 
+import argparse
+import json
 import os
 import sys
 import time
 from pathlib import Path
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+REPO_ROOT = Path(__file__).resolve().parents[3]
+sys.path.insert(0, str(REPO_ROOT / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-CAD = str(Path(__file__).resolve().parents[3] / "config" / "cad")
-GRID = os.path.join(CAD, "collision_clearance.npz")
-ENV = os.path.join(CAD, "collision_envelope.npz")
+from openderm.script_config import CollisionConfig, load_script_config
 
-RX = np.linspace(0.0, 1.92, 9)
-# z MUST be dense: the runtime guard takes the conservative MIN over the grid
-# cell around a query, and clearance is ~1-Lipschitz in z (mm per mm), so the
-# cell size bounds worst-case over-refusal. Thirty points produce ~14mm cells,
-# keeping interpolation conservatism below the 20mm margin.
-Z = np.linspace(0.0, 406.0, 30)
-X = np.linspace(0.0, 815.0, 30)
-Y = np.linspace(0.0, 680.0, 30)
+CALIBRATION_PATH = REPO_ROOT / "config" / "cad" / "frame_calibration.json"
 
 
 _CM = None
+_X = None
+_Y = None
 
 
-def _worker_init():
+def _worker_init(x, y):
     # One CollisionModel per worker process (FCL objects are not picklable).
-    global _CM
+    global _CM, _X, _Y
     from collision_model import CollisionModel
 
     _CM = CollisionModel()
+    _X, _Y = x, y
 
 
 def _sweep_pair(job):
     i, j, rx, z = job
-    out = np.empty((len(X), len(Y)), np.float32)
-    for k, x in enumerate(X):
-        for l, y in enumerate(Y):
+    out = np.empty((len(_X), len(_Y)), np.float32)
+    for k, x in enumerate(_X):
+        for l, y in enumerate(_Y):
             out[k, l] = _CM.clearance(x, y, z, rx)
     return i, j, out
 
 
-def sweep(jobs=None):
+def sweep(grid_path: Path, settings: CollisionConfig):
     # Embarrassingly parallel over (rx,z) pairs; each worker owns a model.
     import multiprocessing as mp
 
-    jobs = int(jobs) if jobs else max(1, min(12, (os.cpu_count() or 4) // 4))
+    travel = json.loads(CALIBRATION_PATH.read_text())["real_travel"]
+    RX = np.linspace(*travel["rx_rad"], settings.rx_points)
+    # Dense Z cells limit the runtime guard's conservative interpolation refusal.
+    Z = np.linspace(*travel["z_mm"], settings.z_points)
+    X = np.linspace(*travel["x_mm"], settings.x_points)
+    Y = np.linspace(*travel["y_mm"], settings.y_points)
+    jobs = settings.workers
+    if jobs is None:
+        jobs = max(1, min(12, (os.cpu_count() or 4) // 4))
     pairs = [(i, j, rx, z) for i, rx in enumerate(RX) for j, z in enumerate(Z)]
     C = np.empty((len(RX), len(Z), len(X), len(Y)), np.float32)
     t0 = time.time()
     done = 0
-    with mp.Pool(jobs, initializer=_worker_init) as pool:
+    with mp.Pool(jobs, initializer=_worker_init, initargs=(X, Y)) as pool:
         for i, j, block in pool.imap_unordered(_sweep_pair, pairs):
             C[i, j] = block
             done += 1
@@ -73,17 +81,19 @@ def sweep(jobs=None):
                 f"elapsed {el:5.0f}s eta {el / done * (len(pairs) - done):5.0f}s",
                 flush=True,
             )
-    np.savez(GRID, rx=RX, z=Z, x=X, y=Y, clearance=C)
-    print("saved", GRID, C.shape)
+    grid_path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(grid_path, rx=RX, z=Z, x=X, y=Y, clearance=C)
+    print("saved", grid_path, C.shape)
 
 
-def derive(margin=20.0, backlash_deg=2.5):
+def derive(grid_path: Path, out_path: Path, settings: CollisionConfig):
     from scipy.interpolate import interp1d
 
-    d = np.load(GRID)
-    RXg, Zg, Xg, Yg, C = d["rx"], d["z"], d["x"], d["y"], d["clearance"]
+    margin, backlash_deg = settings.margin_mm, settings.backlash_deg
+    with np.load(grid_path) as d:
+        RXg, Zg, Xg, Yg, C = d["rx"], d["z"], d["x"], d["y"], d["clearance"]
     # interpolate rx to a fine grid so a small backlash is representable
-    RXf = np.linspace(RXg[0], RXg[-1], 89)
+    RXf = np.linspace(RXg[0], RXg[-1], settings.fine_rx_points)
     Cf = interp1d(RXg, C, axis=0)(RXf).astype(np.float32)
     drx = RXf[1] - RXf[0]
     span = max(1, int(round(np.radians(backlash_deg) / drx)))
@@ -92,8 +102,9 @@ def derive(margin=20.0, backlash_deg=2.5):
         lo, hi = max(0, i - span), min(len(RXf), i + span + 1)
         robust[i] = Cf[lo:hi].min(axis=0)
     safe = robust >= margin
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(
-        ENV,
+        out_path,
         rx=RXf,
         z=Zg,
         x=Xg,
@@ -104,7 +115,7 @@ def derive(margin=20.0, backlash_deg=2.5):
         backlash_deg=backlash_deg,
     )
     print(
-        f"saved {ENV}  margin={margin}mm backlash=+/-{backlash_deg}deg "
+        f"saved {out_path}  margin={margin}mm backlash=+/-{backlash_deg}deg "
         f"(rx-span={span} cells ~ +/-{np.degrees(span * drx):.1f}deg)\n"
     )
     # answer "does the x-limit depend on z?": max reachable x (any safe y) per (rx,z)
@@ -119,12 +130,38 @@ def derive(margin=20.0, backlash_deg=2.5):
     return RXf, Zg, Xg, Yg, robust, safe
 
 
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description="Build a collision envelope using settings from config/scripts.json."
+    )
+    modes = parser.add_subparsers(dest="mode", required=True)
+    sweep_parser = modes.add_parser("sweep", help="Compute a clearance grid and safe envelope.")
+    derive_parser = modes.add_parser("derive", help="Derive an envelope from a saved grid.")
+    for mode in (sweep_parser, derive_parser):
+        mode.add_argument(
+            "--grid",
+            required=True,
+            type=Path,
+            help="Clearance grid NPZ (output for sweep, input for derive).",
+        )
+        mode.add_argument("--out", required=True, type=Path, help="Safe envelope NPZ to write.")
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        settings = CollisionConfig(**load_script_config("collision"))
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.grid.resolve() == args.out.resolve():
+        parser.error("--grid and --out must be different files")
+    if args.mode == "sweep":
+        sweep(args.grid, settings)
+    derive(args.grid, args.out, settings)
+    return 0
+
+
 if __name__ == "__main__":
-    mode = sys.argv[1] if len(sys.argv) > 1 else "sweep"
-    if mode == "sweep":
-        sweep(jobs=sys.argv[2] if len(sys.argv) > 2 else None)
-        derive()
-    else:
-        m = float(sys.argv[2]) if len(sys.argv) > 2 else 20.0
-        b = float(sys.argv[3]) if len(sys.argv) > 3 else 2.5
-        derive(m, b)
+    raise SystemExit(main())
