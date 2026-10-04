@@ -19,6 +19,6 @@
     "Linear offsets = the CAD joint UPPER limit (real 0 anchors there, scale -1); rx offset = the CAD LOWER limit.",
     "rx home (real 0 rad) = CAD -0.9599 rad (-55 deg tilt stop). Code moves rx to ~0.95 rad real after homing = ~level (cad ~0); home unchanged.",
     "Re-fit these offsets after any CAD export that changes link frames or mate origins.",
-    "VALIDATION RULE: after any re-export, validate representative safe poses through the collision model before rebuilding the envelope (see cad/README.md)."
+    "VALIDATION RULE: after any re-export, validate representative safe poses through the collision model before rebuilding the envelope (see docs/collision_guard.md)."
   ]
 }

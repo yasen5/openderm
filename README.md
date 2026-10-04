@@ -25,9 +25,9 @@ Raspberry Pi #1 controls the X-axis via Klipper. The Raspberry Pi Pico controls 
 
 ### Operate and capture
 
-- [Motion control](src/openderm/motion/README.md) — start the motion services and control the X, Y, Z, and RX axes.
-- [Distance sensors and RX limit switches](src/openderm/sensors/README.md) — sensor wiring, readings, and limit-switch commands.
-- [Camera capture](src/openderm/camera/README.md) — configure Canon EDSDK and capture photographs.
+- [Motion control](docs/motion.md) — start the motion services and control the X, Y, Z, and RX axes.
+- [Distance sensors and RX limit switches](docs/sensors.md) — sensor wiring, readings, and limit-switch commands.
+- [Camera capture](docs/camera.md) — configure Canon EDSDK and capture photographs.
 - [Capture and processing procedure](docs/scanning-procedure.md) — preflight, calibration, scanning, reconstruction, and scan comparison.
 
 ### Process and compare
@@ -37,7 +37,7 @@ Raspberry Pi #1 controls the X-axis via Klipper. The Raspberry Pi Pico controls 
 ### Technical references
 
 - [Self-collision guard](docs/collision_guard.md) — collision-envelope generation, runtime enforcement, and safety behavior.
-- [Calibration and collision scripts](scripts/README.md) — RX-pivot calibration, floor calibration, and collision-envelope tools.
+- [Calibration and collision scripts](docs/calibration-and-collision.md) — RX-pivot calibration, floor calibration, and collision-envelope tools.
 
 ## Install
 
@@ -164,13 +164,17 @@ Processing outputs include `texture.jpg`, `surface_mesh.obj`, `viewer.html`, `pl
 
 - `src/openderm/` — hardware control and capture workflows.
 - `src/skinmap/` — 3D registration, artifact detection, and scan comparison.
-- `pico/` — MicroPython Y/Z motion firmware.
-- `klipper/` — example Klipper configuration and macros.
-- `scripts/calibration/` — RX-pivot and floor calibration tools.
-- `scripts/collision/` — CAD-derived collision-envelope tools.
-- `cad/` — mechanical models and the precomputed collision envelope.
+- `src/pico/` — MicroPython Y/Z motion firmware.
+- `src/tests/` — hardware-free unit and simulation tests.
+- `src/scripts/calibration/` — RX-pivot and floor calibration tools.
+- `src/scripts/collision/` — CAD-derived collision-envelope tools.
+- `config/` — environment templates, Klipper configuration, CAD models, calibration, and collision tables.
+- `third_party/` — vendored Three.js libraries and the Pico compatibility launcher.
 - `docs/` — setup, operation, reconstruction, and safety documentation.
-- `tests/` — hardware-free unit and simulation tests.
+
+Non-code test fixtures belong in `test-assets/` when needed; generated example
+outputs are not tracked. Documentation, licenses, and files required at fixed
+locations by build tools or GitHub remain outside these directories.
 
 ## Verify the installation
 

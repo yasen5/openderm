@@ -1,10 +1,10 @@
 """Offline self-collision model for the gantry.
 
-Loads cad/robot.urdf, groups each rigid link into a single collision body, and
+Loads config/cad/robot.urdf, groups each rigid link into a single collision body, and
 checks the moving links against the static frame (and each other) with FCL.
 
 Coordinates are the REAL controller values (x,y,z in mm, rx in rad); they are
-mapped to CAD/URDF joint values via cad/frame_calibration.json.
+mapped to CAD/URDF joint values via config/cad/frame_calibration.json.
 
 Install the ``collision`` dependency group before running this module. It is the
 offline oracle used to precompute the collision-free envelope; the runtime
@@ -17,13 +17,14 @@ import json
 import math
 import os
 from itertools import combinations
+from pathlib import Path
 
 import fcl
 import trimesh
 import yourdfpy
 
-REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-CAD_DIR = os.path.join(REPO, "cad")
+REPO = Path(__file__).resolve().parents[3]
+CAD_DIR = os.path.join(REPO, "config", "cad")
 URDF_PATH = os.path.join(CAD_DIR, "robot.urdf")
 CALIB_PATH = os.path.join(CAD_DIR, "frame_calibration.json")
 

@@ -1,6 +1,6 @@
 """Runs the Pico gantry-firmware simulator in a subprocess.
 
-The simulator stubs MicroPython modules to import pico/gantry_firmware.py off
+The simulator stubs MicroPython modules to import src/pico/gantry_firmware.py off
 hardware; running it in its own process keeps those stubs from contaminating the rest of the
 suite. It asserts the MOVEC cruise (look-ahead) behaviour and that every safety clamp still
 holds; here we just assert it exits 0 with the success sentinel.

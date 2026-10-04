@@ -1,7 +1,7 @@
 """Precompute the self-collision-free envelope for the gantry.
 
-  sweep : python scripts/collision/build_collision_envelope.py sweep
-  derive: python scripts/collision/build_collision_envelope.py derive <margin_mm> <backlash_deg>
+  sweep : python src/scripts/collision/build_collision_envelope.py sweep
+  derive: python src/scripts/collision/build_collision_envelope.py derive <margin_mm> <backlash_deg>
 
 `sweep` computes the raw min-clearance grid over (rx,z,x,y) in REAL controller units
 (mm for x/y/z, rad for rx) via the FCL collision model and saves it (slow, ~10 min).
@@ -9,19 +9,18 @@
 into the safe (x,y) masks. rx is interpolated to a fine grid so a small backlash is
 honored despite the coarse sweep.
 
-Writes: cad/collision_clearance.npz (grid), cad/collision_envelope.npz (safe masks).
+Writes: config/cad/collision_clearance.npz (grid), config/cad/collision_envelope.npz (safe masks).
 """
 
 import os
 import sys
 import time
+from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-CAD = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "cad"
-)
+CAD = str(Path(__file__).resolve().parents[3] / "config" / "cad")
 GRID = os.path.join(CAD, "collision_clearance.npz")
 ENV = os.path.join(CAD, "collision_envelope.npz")
 

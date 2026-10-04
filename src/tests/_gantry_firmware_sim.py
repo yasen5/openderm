@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Off-hardware simulation of the Pico gantry firmware.
 
-Run as a STANDALONE process (tests/test_gantry_firmware.py invokes it via subprocess) so the
+Run as a STANDALONE process (src/tests/test_gantry_firmware.py invokes it via subprocess) so the
 MicroPython module stubs (machine / rp2 / uselect / time) it installs can't contaminate the
 rest of the test suite. Drives Axis.emit_block() block-by-block with the PIO FIFO drained each
 tick (steady state: the PIO consumes one block per slice) and records the (pos_mm, speed_mm/s)

@@ -136,8 +136,8 @@ Copy the baseline Klipper files into the active config directory:
 
 ```bash
 mkdir -p ~/printer_data/config
-cp klipper/printer.cfg ~/printer_data/config/printer.cfg
-cp klipper/macros.cfg ~/printer_data/config/macros.cfg
+cp config/klipper/printer.cfg ~/printer_data/config/printer.cfg
+cp config/klipper/macros.cfg ~/printer_data/config/macros.cfg
 ```
 
 Edit `~/printer_data/config/printer.cfg` and set:
@@ -251,7 +251,7 @@ openderm --axis x move-by -10 --feed 900
 ```
 
 Klipper controls X only. Follow the root README to install
-`pico/gantry_firmware.py` as `main.py` and start `openderm-pico-bridge` for Y/Z
+`src/pico/gantry_firmware.py` as `main.py` and start `openderm-pico-bridge` for Y/Z
 control.
 
 ## 11. Calibrate before use

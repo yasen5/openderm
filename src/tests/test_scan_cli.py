@@ -120,14 +120,14 @@ class RegulatorDefaultsTests(unittest.TestCase):
 
 class KlipperExampleTests(unittest.TestCase):
     def test_x_travel_and_mcu_identifier_are_portable(self) -> None:
-        path = Path(__file__).resolve().parents[1] / "klipper" / "printer.cfg"
+        path = Path(__file__).resolve().parents[2] / "config" / "klipper" / "printer.cfg"
         contents = path.read_text(encoding="utf-8")
         x_section = contents.split("[stepper_x]", 1)[1].split("[stepper_x1]", 1)[0]
         self.assertIn("position_max: 800", x_section)
         self.assertIn("serial: /dev/serial/by-id/<your-klipper-mcu-id>", contents)
 
     def test_yz_sections_are_inert_klipper_requirements(self) -> None:
-        path = Path(__file__).resolve().parents[1] / "klipper" / "printer.cfg"
+        path = Path(__file__).resolve().parents[2] / "config" / "klipper" / "printer.cfg"
         contents = path.read_text(encoding="utf-8").lower()
         self.assertIn("inert required sections", contents)
         self.assertIn("pico exclusively", contents)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import sysconfig
 from pathlib import Path
 
 import cv2
@@ -179,20 +180,25 @@ def _b64(arr) -> str:
 
 
 def export_viewer(out_dir, frames, R, C, mdl, pos, uvn, faces, X, track_err, stats):
-    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    repo_libraries = Path(__file__).resolve().parents[2] / "third_party" / "threejs"
+    installed_libraries = (
+        Path(sysconfig.get_path("data")) / "share" / "openderm" / "third_party" / "threejs"
+    )
+    libraries = repo_libraries if repo_libraries.is_dir() else installed_libraries
     three_b64 = orbit_b64 = ""
     for name, var in (("three.module.min.js", "three"), ("OrbitControls.js", "orbit")):
-        p = os.path.join(assets, name)
-        if os.path.exists(p):
-            data = base64.b64encode(open(p, "rb").read()).decode()
+        p = libraries / name
+        if p.is_file():
+            data = base64.b64encode(p.read_bytes()).decode()
             if var == "three":
                 three_b64 = data
             else:
                 orbit_b64 = data
-    if not three_b64:
+    if not three_b64 or not orbit_b64:
+        three_b64 = orbit_b64 = ""
         print(
-            "      ! scripts/assets/three.module.min.js missing -- viewer will "
-            "fall back to CDN (needs internet)"
+            f"      ! Three.js viewer libraries missing from {libraries} -- "
+            "viewer will fall back to CDN (needs internet)"
         )
 
     # cap the embedded copy at the WebGL max texture size of every desktop

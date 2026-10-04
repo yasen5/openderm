@@ -4,9 +4,9 @@ Config-dependent self-collision avoidance for the 4-DOF gantry (x, y, z, rx). A 
 
 ## Pipeline (offline → runtime)
 
-1. **CAD → URDF** (`cad/robot.urdf`, generated with `onshape-to-robot`).
-2. **Collision engine** (`scripts/collision/collision_model.py`; install with `pip install -e ".[collision]"`): clearance between every moving link and the static frame or other non-adjacent links, using the real→CAD calibration (`cad/frame_calibration.json`). ACM = adjacent (carriage-on-rail) + structural overlaps from known-safe poses.
-3. **Envelope sweep** (`scripts/collision/build_collision_envelope.py`): raw min-clearance grid over `(rx, z, x, y)` in real controller units → `cad/collision_clearance.npz`. `derive` re-thresholds it at a margin + rx-backlash (rx interpolated fine) → safe masks + robust-clearance grid in `cad/collision_envelope.npz`. Current: **20 mm margin, ±2.5°**.
+1. **CAD → URDF** (`config/cad/robot.urdf`, generated with `onshape-to-robot`).
+2. **Collision engine** (`src/scripts/collision/collision_model.py`; install with `pip install -e ".[collision]"`): clearance between every moving link and the static frame or other non-adjacent links, using the real→CAD calibration (`config/cad/frame_calibration.json`). ACM = adjacent (carriage-on-rail) + structural overlaps from known-safe poses.
+3. **Envelope sweep** (`src/scripts/collision/build_collision_envelope.py`): raw min-clearance grid over `(rx, z, x, y)` in real controller units → `config/cad/collision_clearance.npz`. `derive` re-thresholds it at a margin + rx-backlash (rx interpolated fine) → safe masks + robust-clearance grid in `config/cad/collision_envelope.npz`. Current: **20 mm margin, ±2.5°**.
 4. **Runtime guard** (`src/openderm/motion/collision_guard.py`, numpy-only, control host): loads the envelope, answers `is_safe / min_clearance / check_pose / check_path`. **Never calls FCL at runtime** — pure table lookup.
 
 

@@ -189,7 +189,7 @@ def _cruise_batch(
     but ONLY when the axis will still be in flight when the next setpoint
     lands: a cruise waypoint that completes with no fresh target hard-stops
     from speed (firmware EVT UNDERRUN, step-skip risk; see
-    pico/gantry_firmware.py).
+    src/pico/gantry_firmware.py).
     So a batch cruises only when EVERY axis in it moves at least min_step_mm
     from its PREVIOUS streamed setpoint (at 150mm/s2 a 1mm move is still
     accelerating ~115ms later, longer than a loop period). An axis with no
@@ -229,7 +229,7 @@ def _traverse_arc_delta(
 
 
 def _load_floor_model(path: Path) -> dict:
-    """Load a scripts/calibration/floor_depth_tare.py JSON. Returns
+    """Load a src/scripts/calibration/floor_depth_tare.py JSON. Returns
     {'const', 'coeffs', 'rx_min', 'rx_max'}: 'coeffs' is the [c0, c1, c2] of the
     rx-sweep fit z+d = c0 + c1*rx + c2*rx^2 valid over [rx_min, rx_max], or None
     for a single-point tare (constant threshold 'const')."""

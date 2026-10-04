@@ -1,10 +1,10 @@
 """Runtime self-collision guard (numpy-only, control host).
 
-Loads the precomputed collision envelope (``cad/collision_envelope.npz``) and answers
+Loads the precomputed collision envelope (``config/cad/collision_envelope.npz``) and answers
 whether a commanded ``(x, y, z, rx)`` pose clears the static frame by the configured
 margin. This is a pure table lookup -- it never calls FCL/trimesh at runtime, so it runs
 in the control-host venv (numpy only). The envelope is generated offline by
-``scripts/collision/build_collision_envelope.py`` from the CAD model. See ``docs/collision_guard.md``.
+``src/scripts/collision/build_collision_envelope.py`` from the CAD model. See ``docs/collision_guard.md``.
 
 Units are REAL controller units: x, y, z in mm; rx in rad.
 """
@@ -22,9 +22,14 @@ import numpy as np
 _REPO = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
-_REPO_ENVELOPE = Path(_REPO) / "cad" / "collision_envelope.npz"
+_REPO_ENVELOPE = Path(_REPO) / "config" / "cad" / "collision_envelope.npz"
 _INSTALLED_ENVELOPE = (
-    Path(sysconfig.get_path("data")) / "share" / "openderm" / "cad" / "collision_envelope.npz"
+    Path(sysconfig.get_path("data"))
+    / "share"
+    / "openderm"
+    / "config"
+    / "cad"
+    / "collision_envelope.npz"
 )
 DEFAULT_ENVELOPE = str(_REPO_ENVELOPE if _REPO_ENVELOPE.exists() else _INSTALLED_ENVELOPE)
 

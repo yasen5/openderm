@@ -12,8 +12,8 @@ The Pico serves MULTIPLE axes (Y, Z) over ONE serial port, so the connection is 
 A pyserial URL is accepted as the port (e.g. socket://pi1-ip:8095) so the Pico can be bridged
 over the network by ``openderm-pico-bridge``. Requires pyserial.
 
-Quick demo:  python3 pico/gantry_client.py            # ping, home Y, then move Y
-             python3 pico/gantry_client.py --axis z   # same on Z
+Quick demo:  python3 third_party/pico/gantry_client.py            # ping, home Y, then move Y
+             python3 third_party/pico/gantry_client.py --axis z   # same on Z
 """
 
 import argparse
@@ -95,7 +95,7 @@ class PicoLink:
                 raise PicoClientError(
                     "Pico answered PING with %r, not 'OK PONG' -- the REPL is echoing, not the "
                     "gantry firmware. Deploy it as main.py (mpremote fs cp "
-                    "pico/gantry_firmware.py :main.py), reset the Pico, then restart the "
+                    "src/pico/gantry_firmware.py :main.py), reset the Pico, then restart the "
                     "bridge." % reply
                 )
         except BaseException:

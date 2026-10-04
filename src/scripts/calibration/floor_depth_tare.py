@@ -39,7 +39,7 @@ over the bare bed; make sure the swept range is clear) and optional otherwise
 (only records the tilt).
 
 Typical use:
-  python scripts/calibration/floor_depth_tare.py \
+  python src/scripts/calibration/floor_depth_tare.py \
       --pico-port socket://openderm-gantry.local:8095 \
       --target-mm 120 --rx-sweep 0.35:1.5:6
 then scan with:
@@ -60,7 +60,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from openderm.calibration import AxisSetup, CalibrationSession

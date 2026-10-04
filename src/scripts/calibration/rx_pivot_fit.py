@@ -2,7 +2,7 @@
 """Fit the rx-pivot arc from a set of poses that all view the same fixed point.
 
 Feed it a ``captures/rx_pivot_poses_*.jsonl`` file collected with
-``scripts/calibration/rx_pivot_capture.py``. Each recorded pose must view the
+``src/scripts/calibration/rx_pivot_capture.py``. Each recorded pose must view the
 same surface point at a constant standoff, at a different RX angle. The fit
 recovers the camera arc about RX and writes the model used by
 ``openderm-scan``.
@@ -15,7 +15,7 @@ beyond it.
 
 Run with a numpy-capable interpreter, e.g. the calibration venv::
 
-    python scripts/calibration/rx_pivot_fit.py captures/rx_pivot_poses_<timestamp>.jsonl
+    python src/scripts/calibration/rx_pivot_fit.py captures/rx_pivot_poses_<timestamp>.jsonl
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import argparse
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
 from openderm.motion.rx_pivot import RxPivotModel, load_jsonl_records
