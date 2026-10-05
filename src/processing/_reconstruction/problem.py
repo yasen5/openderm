@@ -82,7 +82,7 @@ def _prepare_problem(args, mem_cap=None):
         print(f"[2/9] extracting CLAHE-SIFT features (downscale={args.downscale})")
         extract(frames, args.downscale, args.nfeatures)
         if args.device != "cpu":
-            from skinmap.gpu_match import GpuMatcher, available as _gm_ok
+            from processing.gpu_match import GpuMatcher, available as _gm_ok
 
             if _gm_ok():
                 set_gpu_matcher(GpuMatcher())

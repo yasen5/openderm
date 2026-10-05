@@ -187,7 +187,7 @@ def _prepare_renderer(
     gpu = None
     gpu_oom = RuntimeError
     if device != "cpu":
-        from skinmap.render_gpu import GpuFramePipe, GpuOom, gpu_available
+        from processing.render_gpu import GpuFramePipe, GpuOom, gpu_available
 
         gpu_oom = GpuOom
         if gpu_available():
@@ -251,7 +251,7 @@ def _prepare_renderer(
     # clock (~3 s/frame of spline/projection numpy per pass)
     gpu_geom = None
     if gpu is not None:
-        from skinmap.render_gpu import GpuGeom
+        from processing.render_gpu import GpuGeom
 
         gpu_geom = GpuGeom(
             surf,

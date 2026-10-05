@@ -4,7 +4,7 @@ import math
 import unittest
 
 
-from openderm.motion.cubemars import (
+from capture.motion.cubemars import (
     CAN_PACKET_SET_DUTY,
     CAN_PACKET_SET_ORIGIN_HERE,
     CAN_PACKET_SET_POS_SPD,

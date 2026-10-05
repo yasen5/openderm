@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 
-from openderm.app.cli import (
+from capture.app.cli import (
     build_parser,
     main,
     run_can_via_server,
@@ -14,7 +14,7 @@ from openderm.app.cli import (
     run_linear_via_server,
     serialize_status,
 )
-from openderm.motion.gantry.server import GantryServerError
+from capture.motion.gantry.server import GantryServerError
 
 
 class FakeServerClient:
@@ -130,7 +130,7 @@ class CliTests(unittest.TestCase):
     def test_main_prefers_gantry_server_for_linear_axes(self) -> None:
         # X is the only axis routed through the Klipper gantry server.
         fake_client = FakeServerClient(axis="x")
-        with mock.patch("openderm.app.cli.GantryServerClient", return_value=fake_client):
+        with mock.patch("capture.app.cli.GantryServerClient", return_value=fake_client):
             with mock.patch("sys.argv", ["openderm", "--axis", "x", "move-to", "250"]):
                 with mock.patch("sys.stdout", new_callable=io.StringIO):
                     result = main()
@@ -139,7 +139,7 @@ class CliTests(unittest.TestCase):
 
     def test_main_exits_when_gantry_server_is_unreachable(self) -> None:
         with mock.patch(
-            "openderm.app.cli.GantryServerClient", side_effect=GantryServerError("offline")
+            "capture.app.cli.GantryServerClient", side_effect=GantryServerError("offline")
         ):
             with mock.patch("sys.argv", ["openderm", "--axis", "x", "move-to", "250"]):
                 with mock.patch("sys.stdout", new_callable=io.StringIO):
@@ -149,7 +149,7 @@ class CliTests(unittest.TestCase):
 
     def test_main_uses_rx_axis_server_for_can_axes(self) -> None:
         fake_client = FakeRxAxisClient()
-        with mock.patch("openderm.app.cli.RxAxisServerClient", return_value=fake_client):
+        with mock.patch("capture.app.cli.RxAxisServerClient", return_value=fake_client):
             with mock.patch(
                 "sys.argv", ["openderm", "--axis", "rx", "move-to", "1.5", "--speed", "0.5"]
             ):
@@ -215,8 +215,8 @@ def _pico_args(command: str, **kw) -> argparse.Namespace:
 
 def _patch_pico(link, client):
     return (
-        mock.patch("openderm.motion.pico.adapter.open_pico_link", return_value=link),
-        mock.patch("openderm.motion.pico.adapter.PicoAxisClient", return_value=client),
+        mock.patch("capture.motion.pico.adapter.open_pico_link", return_value=link),
+        mock.patch("capture.motion.pico.adapter.PicoAxisClient", return_value=client),
     )
 
 
@@ -272,9 +272,9 @@ class PicoCliTests(unittest.TestCase):
 
     def test_pico_closes_link_and_translates_error(self) -> None:
         link = FakeLink()
-        p1 = mock.patch("openderm.motion.pico.adapter.open_pico_link", return_value=link)
+        p1 = mock.patch("capture.motion.pico.adapter.open_pico_link", return_value=link)
         p2 = mock.patch(
-            "openderm.motion.pico.adapter.PicoAxisClient", side_effect=RuntimeError("link stalled")
+            "capture.motion.pico.adapter.PicoAxisClient", side_effect=RuntimeError("link stalled")
         )
         with p1, p2:
             with self.assertRaises(GantryServerError):
@@ -287,7 +287,7 @@ class PicoCliTests(unittest.TestCase):
         with (
             p1,
             p2,
-            mock.patch("openderm.app.cli.GantryServerClient") as gsc,
+            mock.patch("capture.app.cli.GantryServerClient") as gsc,
             mock.patch(
                 "sys.argv",
                 ["openderm", "--axis", "y", "--pico-port", "socket://pico:8095", "move-to", "150"],

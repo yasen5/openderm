@@ -13,7 +13,7 @@ import unittest
 from dataclasses import dataclass
 from unittest import mock
 
-from openderm.scanning import regulate
+from capture.scanning import regulate
 
 
 @dataclass
@@ -124,7 +124,7 @@ def _run(extra_args, pico_client=None):
             *extra_args,
         ]
     )
-    import openderm.motion.pico.adapter as pico_mod
+    import capture.motion.pico.adapter as pico_mod
 
     with (
         mock.patch.object(regulate.signal, "signal", lambda s, h: captured.__setitem__("h", h)),

@@ -77,7 +77,7 @@ def commands(args: argparse.Namespace) -> tuple[list[str], list[str], list[list[
     rigfit_dir = capture_dir / "registration3d-rigfit"
     canonical_dir = capture_dir / "registration3d-canonical"
     flags = registration_flags(args)
-    module = [sys.executable, "-m", "skinmap.register_scan_3d", str(capture_dir)]
+    module = [sys.executable, "-m", "processing.register_scan_3d", str(capture_dir)]
     stage_one = [*module, *flags, "--out", str(rigfit_dir)]
     stage_two = [
         *module,
@@ -88,8 +88,8 @@ def commands(args: argparse.Namespace) -> tuple[list[str], list[str], list[list[
         str(canonical_dir),
     ]
     checks = [
-        [sys.executable, "-m", "skinmap.find_doublings", str(canonical_dir)],
-        [sys.executable, "-m", "skinmap.ghost_check", str(canonical_dir)],
+        [sys.executable, "-m", "processing.find_doublings", str(canonical_dir)],
+        [sys.executable, "-m", "processing.ghost_check", str(canonical_dir)],
     ]
     return stage_one, stage_two, checks
 

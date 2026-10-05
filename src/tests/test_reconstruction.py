@@ -14,10 +14,10 @@ cv2 = pytest.importorskip(
 )
 np = pytest.importorskip("numpy")
 
-from skinmap import register_scan_3d
-from skinmap.registration_export import build_mesh
-from skinmap.registration_features import Frame, Pair, load_frames
-from skinmap.registration_geometry import (
+from processing import register_scan_3d
+from processing.registration_export import build_mesh
+from processing.registration_features import Frame, Pair, load_frames
+from processing.registration_geometry import (
     RigModel,
     build_tracks,
     project,
@@ -25,13 +25,13 @@ from skinmap.registration_geometry import (
     triangulate,
     undistort_norm,
 )
-from skinmap.registration_surface import (
+from processing.registration_surface import (
     Surface,
     TexParam,
     fit_surface,
     ray_surface_intersect,
 )
-from skinmap.registration_texture import _write_texture_outputs
+from processing.registration_texture import _write_texture_outputs
 
 
 def _frame(

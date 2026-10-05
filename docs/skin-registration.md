@@ -49,7 +49,7 @@ Use same-scan null tests to verify that all lesions match with no false new or d
 
 ### Lesion size-change and uncertainty
 
-`src/skinmap/track_moles.py` (wired into `compare_scans`, stage `[6]`). For every matched mole pair it reports Δdiameter, Δarea, Δshape with a per-mole error bar and a significance flag (grew / shrank / stable).
+`src/processing/track_moles.py` (wired into `compare_scans`, stage `[6]`). For every matched mole pair it reports Δdiameter, Δarea, Δshape with a per-mole error bar and a significance flag (grew / shrank / stable).
 
 - **Exposure-invariant size.** `melanin_flat` is a log-ratio (`log(R_skin/R)`), so a multiplicative exposure/WB gain cancels — size is measured at the **half-max iso-contour of each mole's own peak** (a fraction-of-peak boundary), not an absolute threshold. Saturated or badly exposed images are rejected during capture review because destroyed image information cannot be recovered.
 - **Warp-independent measurement.** Every size number is measured in each scan's **own un-warped frame**; the transform is used only to MATCH moles, never to resample lesion pixels, so alignment cannot erase an apparent size change.

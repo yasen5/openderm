@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from openderm.motion.security import (
+from capture.motion.security import (
     MotionSecurityError,
     bearer_token_matches,
     bridge_auth_line_matches,

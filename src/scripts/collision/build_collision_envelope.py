@@ -26,7 +26,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from openderm.script_config import CollisionConfig, load_script_config
+from capture.script_config import CollisionConfig, load_script_config
 
 CALIBRATION_PATH = REPO_ROOT / "config" / "cad" / "frame_calibration.json"
 

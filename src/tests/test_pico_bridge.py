@@ -4,7 +4,7 @@ import socket
 import threading
 import unittest
 
-from openderm.motion.pico.bridge import authenticate_connection
+from capture.motion.pico.bridge import authenticate_connection
 
 
 class PicoBridgeAuthenticationTests(unittest.TestCase):

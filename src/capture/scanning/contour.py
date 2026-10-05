@@ -19,18 +19,18 @@ import os
 import sys
 from pathlib import Path
 
-from openderm.motion.gantry.server import (
+from capture.motion.gantry.server import (
     GantryServerClient,
     GantryServerError,
 )
-from openderm.motion.rx_axis.server import (
+from capture.motion.rx_axis.server import (
     RxAxisServerClient,
     RxAxisServerError,
 )
-from openderm.motion.collision_guard import CollisionGuard
-from openderm.motion.rx_pivot import RxPivotModel
-from openderm.sensors.hg_c import build_sensor_controller
-from openderm.camera.canon import (
+from capture.motion.collision_guard import CollisionGuard
+from capture.motion.rx_pivot import RxPivotModel
+from capture.sensors.hg_c import build_sensor_controller
+from capture.camera.canon import (
     CanonCamera,
     CanonCaptureConfig,
     CanonEdsdk,
@@ -162,7 +162,7 @@ def run(args: argparse.Namespace) -> int:
         "z": dict(vmax=args.z_pico_vmax_mm_s, acc=args.z_pico_acc_mm_s2, home=args.home_z),
     }
     try:
-        from openderm.motion.pico.adapter import (
+        from capture.motion.pico.adapter import (
             PicoAxisClient,
             PicoMultiAxis,
             open_pico_link,

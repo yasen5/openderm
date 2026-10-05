@@ -53,7 +53,7 @@ class RxAxisConfigTests(unittest.TestCase):
         fake_response.__enter__.return_value = fake_response
         fake_response.__exit__.return_value = False
         with mock.patch(
-            "openderm.motion.rx_axis.client.request.urlopen",
+            "capture.motion.rx_axis.client.request.urlopen",
             return_value=fake_response,
         ) as urlopen:
             client.status()

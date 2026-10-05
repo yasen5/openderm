@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 
 import build_collision_envelope as builder
-from openderm.motion.collision_guard import CollisionGuard
-from openderm.script_config import CollisionConfig, load_script_config
+from capture.motion.collision_guard import CollisionGuard
+from capture.script_config import CollisionConfig, load_script_config
 
 
 class CollisionEnvelopeTests(unittest.TestCase):

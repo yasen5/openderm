@@ -30,15 +30,15 @@ import cv2
 from scipy.ndimage import gaussian_laplace, maximum_filter
 from scipy.interpolate import LinearNDInterpolator
 
-from skinmap.tex_anchor import load_gauge, coverage_mask, _parse_obj_v_vt
-from skinmap.lesions import (
+from processing.tex_anchor import load_gauge, coverage_mask, _parse_obj_v_vt
+from processing.lesions import (
     detect_angiomas,
     detect_moles,
     hemoglobin_flat,
     mel_threshold,
     melanin_flat,
 )
-from skinmap.register_scan_3d import project
+from processing.register_scan_3d import project
 
 
 # --------------------------------------------------------------------------- #

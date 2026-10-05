@@ -6,7 +6,7 @@ import math
 import sys
 import time
 
-from openderm.motion.rx_axis.server import RxAxisServerError
+from capture.motion.rx_axis.server import RxAxisServerError
 
 from ..config import (
     RX_OSC_BACKSWING_DEADBANDS,

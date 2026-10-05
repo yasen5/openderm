@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 
-from openderm.sensors.hg_c import (
+from capture.sensors.hg_c import (
     HgCSensorConfig,
     HgCSensorController,
     SensorChannelConfig,

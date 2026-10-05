@@ -6,7 +6,7 @@ import unittest
 from pydantic import ValidationError
 
 
-from openderm.motion.api_models import (
+from capture.motion.api_models import (
     GantryHomeRequest,
     GantryMoveRequest,
     GantryStopRequest,

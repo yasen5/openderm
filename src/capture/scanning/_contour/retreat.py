@@ -6,7 +6,7 @@ import math
 import sys
 import time
 
-from openderm.motion.gantry.server import GantryServerError
+from capture.motion.gantry.server import GantryServerError
 
 from ..config import BREADCRUMB_SPACING_RAD
 from ..helpers import _clamp, _classify_standoff

@@ -7,7 +7,7 @@ import sys
 import time
 from types import SimpleNamespace
 
-from openderm.motion.rx_axis.server import RxAxisServerError
+from capture.motion.rx_axis.server import RxAxisServerError
 
 from . import rx_servo
 from ..config import (

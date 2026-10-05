@@ -1,4 +1,4 @@
-"""skinmap — 3D skin-scan registration, artifact checking, and mole tracking.
+"""processing — 3D skin-scan registration, artifact checking, and mole tracking.
 
 The vision half of the openderm project: everything that turns a
 captured scan folder (``captures/<scan>/``) into a registered 3D

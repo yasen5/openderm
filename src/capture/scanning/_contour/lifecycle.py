@@ -6,9 +6,9 @@ import sys
 import time
 from pathlib import Path
 
-from openderm.motion.gantry.server import GantryServerError
-from openderm.motion.rx_axis.server import RxAxisServerError
-from openderm.sensors.hg_c import HgCSensorError
+from capture.motion.gantry.server import GantryServerError
+from capture.motion.rx_axis.server import RxAxisServerError
+from capture.sensors.hg_c import HgCSensorError
 
 from ..config import FLOOR_SUSPECT_BAND_MM, PARK_RISE_MM, PARK_RX_RAD
 from ..helpers import _fmt_bound

@@ -64,13 +64,13 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from openderm.calibration import AxisSetup, CalibrationSession
-from openderm.script_config import calibration_options
-from openderm.motion.rx_axis.server import (
+from capture.calibration import AxisSetup, CalibrationSession
+from capture.script_config import calibration_options
+from capture.motion.rx_axis.server import (
     RxAxisServerClient,
     RxAxisServerError,
 )
-from openderm.sensors.hg_c import build_sensor_controller
+from capture.sensors.hg_c import build_sensor_controller
 
 
 def _clamp(value: float, limit: float) -> float:
@@ -460,7 +460,7 @@ def _connect_session(
     args: argparse.Namespace,
     sweep_targets: list[float] | None,
 ) -> tuple[CalibrationSession, float | None] | None:
-    from openderm.motion.pico.adapter import PicoAxisClient, open_pico_link
+    from capture.motion.pico.adapter import PicoAxisClient, open_pico_link
 
     session = CalibrationSession()
     try:

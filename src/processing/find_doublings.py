@@ -19,14 +19,14 @@ import numpy as np
 import cv2
 from scipy.ndimage import maximum_filter
 
-from skinmap.tex_anchor import load_gauge, coverage_mask
-from skinmap.lesions import (
+from processing.tex_anchor import load_gauge, coverage_mask
+from processing.lesions import (
     detect_angiomas,
     detect_moles,
     hemoglobin_flat,
     melanin_flat,
 )
-from skinmap.ghost_check import load_rig, build_uv_to_world, project_pt, load_src
+from processing.ghost_check import load_rig, build_uv_to_world, project_pt, load_src
 
 
 def matched_z(im, px, py, ppmm_s, channel):

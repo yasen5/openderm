@@ -14,8 +14,8 @@ from unittest import mock
 
 os.environ.setdefault("OPENDERM_COLLISION_MODE", "off")
 
-from openderm.motion.rx_pivot import HarmonicFit, RxPivotModel
-from openderm.scanning import contour as scan
+from capture.motion.rx_pivot import HarmonicFit, RxPivotModel
+from capture.scanning import contour as scan
 
 from contour_fake_world import (
     TARGET_MM,
@@ -106,7 +106,7 @@ def _run_sim(
                 self.clients[axis].stream_to(target, continuous=continuous)
             return {"status": "queued"}
 
-    import openderm.motion.pico.adapter as pico_adapter
+    import capture.motion.pico.adapter as pico_adapter
 
     stdout = io.StringIO()
     stderr = io.StringIO()

@@ -6,7 +6,7 @@ import time
 import unittest
 
 
-from openderm.camera.canon import (
+from capture.camera.canon import (
     CanonCamera,
     CanonCaptureConfig,
     CanonError,

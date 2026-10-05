@@ -53,15 +53,15 @@ import signal
 import sys
 import time
 
-from openderm.config import default_pico_port
-from openderm.motion.gantry.server import (
+from capture.config import default_pico_port
+from capture.motion.gantry.server import (
     GantryServerError,
 )
-from openderm.motion.rx_axis.server import (
+from capture.motion.rx_axis.server import (
     RxAxisServerClient,
     RxAxisServerError,
 )
-from openderm.sensors.hg_c import (
+from capture.sensors.hg_c import (
     HgCSensorError,
     build_sensor_controller,
 )
@@ -111,7 +111,7 @@ def run(args: argparse.Namespace) -> int:
     pico_link = None
     if args.regulate_z:
         try:
-            from openderm.motion.pico.adapter import PicoAxisClient, open_pico_link
+            from capture.motion.pico.adapter import PicoAxisClient, open_pico_link
 
             print(f"connecting to Pico (Z) on {args.pico_port} ...", file=sys.stderr)
             pico_link = open_pico_link(args.pico_port, timeout_s=30.0)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 import unittest
 
-from openderm.calibration import AxisSetup, CalibrationSession
+from capture.calibration import AxisSetup, CalibrationSession
 
 
 class FakeLink:

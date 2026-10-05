@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-from openderm.config import default_pico_port
+from capture.config import default_pico_port
 
 from .config import *  # noqa: F401,F403 (DEFAULT_* used as argparse defaults)
 

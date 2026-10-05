@@ -5,17 +5,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from openderm.app.cli import build_parser as build_motion_parser
-from openderm.config import default_pico_port, linear_axis_limits
-from openderm.scanning.cli import build_parser, expanded_args
-from openderm.scanning.regulate import build_parser as build_regulator_parser
+from capture.app.cli import build_parser as build_motion_parser
+from capture.config import default_pico_port, linear_axis_limits
+from capture.scanning.cli import build_parser, expanded_args
+from capture.scanning.regulate import build_parser as build_regulator_parser
 
 
 class CaptureCliTests(unittest.TestCase):
     def test_scan_profile_matches_default_rig_settings(self) -> None:
         args = build_parser().parse_args(["captures/example"])
         scanner, values = expanded_args(args, [])
-        self.assertEqual(scanner.__name__, "openderm.scanning.contour")
+        self.assertEqual(scanner.__name__, "capture.scanning.contour")
         expected_pairs = {
             "--x-travel-mm": "300",
             "--x-step-mm": "20",

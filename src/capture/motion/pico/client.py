@@ -6,7 +6,7 @@ The Pico serves MULTIPLE axes (Y, Z) over ONE serial port, so the connection is 
   PicoLink   -- owns the serial connection + the line protocol (axis-agnostic cmd()).
   AxisClient -- a thin per-axis convenience built on a PicoLink (default Y), for interactive
                 use. The contour/pivot scripts use the GantryServerClient-compatible adapter
-                in openderm.motion.pico.adapter (PicoAxisClient), which also shares a
+                in capture.motion.pico.adapter (PicoAxisClient), which also shares a
                 single PicoLink across Y and Z.
 
 A pyserial URL is accepted as the port (e.g. socket://pi1-ip:8095) so the Pico can be bridged

@@ -2,7 +2,7 @@
 """Register a skin-scan capture folder in full 3D.
 
 The public module owns the CLI lifecycle and delegates the four reconstruction
-stages to :mod:`skinmap._reconstruction`. Keeping the orchestration here
+stages to :mod:`processing._reconstruction`. Keeping the orchestration here
 preserves the command entry point and lets tests replace individual stages
 without importing their implementation details.
 """

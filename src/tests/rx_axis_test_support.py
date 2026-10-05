@@ -6,15 +6,15 @@ import argparse
 import threading
 import unittest
 
-from openderm.config import GantryConfig
-from openderm.motion.cubemars import (
+from capture.config import GantryConfig
+from capture.motion.cubemars import (
     DUTY_CYCLE_ZERO_PAYLOAD,
     SET_ORIGIN_TEMP_PAYLOAD,
     encode_position_velocity_payload,
     encode_rpm_payload,
     rpm_can_id,
 )
-from openderm.motion.rx_axis.server import (
+from capture.motion.rx_axis.server import (
     CanFrame,
     RxAxisServerClient,
     RxAxisServerError,

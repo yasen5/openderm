@@ -13,8 +13,8 @@ except ImportError as exc:  # pragma: no cover - depends on the optional vision 
         'vision dependencies are not installed; use pip install -e ".[vision]"'
     ) from exc
 
-from skinmap.tex_anchor import coverage_mask, load_gauge
-from skinmap.track_moles import write_change_overlay
+from processing.tex_anchor import coverage_mask, load_gauge
+from processing.track_moles import write_change_overlay
 
 
 def _write_placements(registration_dir: Path, *, include_texture: bool = True) -> None:

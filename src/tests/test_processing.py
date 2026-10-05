@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from openderm.processing import build_parser, commands, registration_flags
+from capture.processing import build_parser, commands, registration_flags
 
 
 def make_args(**overrides) -> argparse.Namespace:

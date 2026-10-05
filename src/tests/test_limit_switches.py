@@ -6,7 +6,7 @@ import unittest
 from unittest import mock
 
 
-from openderm.sensors.limit_switches import (
+from capture.sensors.limit_switches import (
     GpiodLimitSwitchReader,
     LimitSwitchConfig,
     LimitSwitchReader,

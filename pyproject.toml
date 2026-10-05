@@ -22,7 +22,7 @@ hardware = [
     "websockets>=12,<14",
 ]
 
-# Vision processing (src/skinmap): registration and mole tracking. Runs on the
+# Vision processing (src/processing): registration and mole tracking. Runs on the
 # workstation, not the Pis. Install with:  pip install -e ".[vision]"
 vision = [
     "numpy>=1.26",
@@ -49,21 +49,21 @@ dev = [
 ]
 
 [project.scripts]
-openderm = "openderm.app.cli:main"
-openderm-canon-capture = "openderm.camera.canon:main"
-openderm-sensors = "openderm.sensors.hg_c:main"
-openderm-limit-switches = "openderm.sensors.limit_switches:main"
-openderm-gantry-server = "openderm.motion.gantry.server:main"
-openderm-rx-axis-server = "openderm.motion.rx_axis.server:main"
-openderm-pico-bridge = "openderm.motion.pico.bridge:main"
-openderm-regulate = "openderm.scanning.regulate:main"
-openderm-scan = "openderm.scanning.cli:main"
+openderm = "capture.app.cli:main"
+openderm-canon-capture = "capture.camera.canon:main"
+openderm-sensors = "capture.sensors.hg_c:main"
+openderm-limit-switches = "capture.sensors.limit_switches:main"
+openderm-gantry-server = "capture.motion.gantry.server:main"
+openderm-rx-axis-server = "capture.motion.rx_axis.server:main"
+openderm-pico-bridge = "capture.motion.pico.bridge:main"
+openderm-regulate = "capture.scanning.regulate:main"
+openderm-scan = "capture.scanning.cli:main"
 # Vision commands require the [vision] extra.
-openderm-process = "openderm.processing:main"
-openderm-register = "skinmap.register_scan_3d:main"
-openderm-check-ghosts = "skinmap.ghost_check:main"
-openderm-check-doublings = "skinmap.find_doublings:main"
-openderm-compare = "skinmap.compare_scans:main"
+openderm-process = "capture.processing:main"
+openderm-register = "processing.register_scan_3d:main"
+openderm-check-ghosts = "processing.ghost_check:main"
+openderm-check-doublings = "processing.find_doublings:main"
+openderm-compare = "processing.compare_scans:main"
 
 [build-system]
 requires = ["setuptools==82.0.1"]
@@ -74,10 +74,10 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["openderm", "openderm.*", "skinmap", "skinmap.*"]
+include = ["capture", "capture.*", "processing", "processing.*"]
 
 [tool.setuptools.package-data]
-skinmap = ["assets/*.html"]
+processing = ["assets/*.html"]
 
 [tool.setuptools.data-files]
 "share/openderm/config/cad" = ["config/cad/collision_envelope.npz"]

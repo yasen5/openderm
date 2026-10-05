@@ -7,7 +7,7 @@ Config-dependent self-collision avoidance for the 4-DOF gantry (x, y, z, rx). A 
 1. **CAD → URDF** (`config/cad/robot.urdf`, generated with `onshape-to-robot`).
 2. **Collision engine** (`src/scripts/collision/collision_model.py`; install with `pip install -e ".[collision]"`): clearance between every moving link and the static frame or other non-adjacent links, using the real→CAD calibration (`config/cad/frame_calibration.json`). ACM = adjacent (carriage-on-rail) + structural overlaps from known-safe poses.
 3. **Envelope sweep** (`src/scripts/collision/build_collision_envelope.py`): raw min-clearance grid over `(rx, z, x, y)` in real controller units → `config/cad/collision_clearance.npz`. Travel ranges come from `config/cad/frame_calibration.json`; margin, backlash, and grid resolution come from `config/scripts.json`. `derive` re-thresholds the selected `--grid` at the configured margin + rx-backlash (rx interpolated fine) → safe masks + robust-clearance grid at the required `--out` path. Reference configuration: **20 mm margin, ±2.5°**. See [utility commands](calibration-and-collision.md).
-4. **Runtime guard** (`src/openderm/motion/collision_guard.py`, numpy-only, control host): loads the envelope, answers `is_safe / min_clearance / check_pose / check_path`. **Never calls FCL at runtime** — pure table lookup.
+4. **Runtime guard** (`src/capture/motion/collision_guard.py`, numpy-only, control host): loads the envelope, answers `is_safe / min_clearance / check_pose / check_path`. **Never calls FCL at runtime** — pure table lookup.
 
 
 
@@ -35,7 +35,7 @@ X (Klipper/Moonraker through the gantry server on port 8090), Y/Z (Pico through 
 
 ## Enforcement
 
-In `openderm.scanning.contour`:
+In `capture.scanning.contour`:
 
 - **Startup gate**: perform a full-pose safety check on the current parked pose; abort the scan if already unsafe.
 - **Per-move**: call `check_pose(x, y, z, rx_target)` after assembling the full target and before dispatch. On `GantryCollisionError`, skip the move and flag the station edge as collision-limited.

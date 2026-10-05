@@ -11,11 +11,11 @@ import pytest
 pytest.importorskip("serial")  # pyserial; the adapter's lazy Pico client import needs it
 
 from gantry_client import PicoClientError
-from openderm.motion.gantry.server import (
+from capture.motion.gantry.server import (
     GantryServerError,
     GantrySoftLimitError,
 )
-from openderm.motion.pico.adapter import PicoAxisClient
+from capture.motion.pico.adapter import PicoAxisClient
 
 
 class FakeLink:

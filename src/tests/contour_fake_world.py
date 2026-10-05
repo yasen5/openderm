@@ -18,7 +18,7 @@ from dataclasses import dataclass
 # The Y soft-travel limit the fake gantry/pico clients enforce. Canonical source
 # (both scan scripts import it from here too), so the fakes stay in sync with the
 # real client without importing either scan script.
-from openderm.motion.gantry.server import (
+from capture.motion.gantry.server import (
     Y_SOFT_MAX_MM,
     Y_SOFT_MIN_MM,
 )
@@ -381,7 +381,7 @@ class FakeGantryClient:
         # Mirror GantryServerClient: refuse a y target outside the (patched) module
         # limits when enforcing, so the y-limit-as-edge path is exercised in the sim.
         if self.enforce_y_limits and not (Y_SOFT_MIN_MM <= value <= Y_SOFT_MAX_MM):
-            from openderm.motion.gantry.server import GantrySoftLimitError
+            from capture.motion.gantry.server import GantrySoftLimitError
 
             raise GantrySoftLimitError(
                 f"refusing to move y to {value:.2f}mm: outside the soft travel limit "
@@ -435,7 +435,7 @@ class FakeGantryClient:
 
 
 class FakePicoAxisClient:
-    """Stand-in for openderm.motion.pico.adapter.PicoAxisClient, backed by the
+    """Stand-in for capture.motion.pico.adapter.PicoAxisClient, backed by the
     SAME FakeWorld as FakeGantryClient. It mirrors the adapter subset the contour scan
     uses (status/move_to/stream_to/home/stop/drain_events)."""
 
@@ -463,7 +463,7 @@ class FakePicoAxisClient:
             and self.enforce_y_limits
             and not (Y_SOFT_MIN_MM <= value <= Y_SOFT_MAX_MM)
         ):
-            from openderm.motion.gantry.server import GantrySoftLimitError
+            from capture.motion.gantry.server import GantrySoftLimitError
 
             raise GantrySoftLimitError(
                 f"refusing to move y to {value:.2f}mm: outside the soft travel limit "

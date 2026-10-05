@@ -6,14 +6,14 @@ from types import ModuleType
 import unittest
 from unittest import mock
 
-from openderm.motion import security
+from capture.motion import security
 
 
 class PicoClientImportTests(unittest.TestCase):
     def test_client_imports_security_from_parent_motion_package(self) -> None:
         fake_serial = ModuleType("serial")
         fake_serial.SerialException = OSError
-        module_name = "openderm.motion.pico.client"
+        module_name = "capture.motion.pico.client"
         original_module = sys.modules.pop(module_name, None)
 
         try:

@@ -9,9 +9,9 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
-from openderm.motion.gantry.server import GantryServerError
-from openderm.motion.rx_axis.server import RxAxisServerError
-from openderm.sensors.hg_c import HgCSensorError
+from capture.motion.gantry.server import GantryServerError
+from capture.motion.rx_axis.server import RxAxisServerError
+from capture.sensors.hg_c import HgCSensorError
 
 
 @dataclass(frozen=True)

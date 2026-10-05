@@ -4,7 +4,7 @@ import math
 from types import SimpleNamespace
 import unittest
 
-from openderm.scanning._contour.recovery import attempt_edge_recovery
+from capture.scanning._contour.recovery import attempt_edge_recovery
 
 
 class ContourRecoveryTests(unittest.TestCase):

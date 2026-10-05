@@ -9,8 +9,8 @@ from unittest import mock
 from urllib import error
 
 
-from openderm.config import GantryConfig
-from openderm.motion.gantry.server import (
+from capture.config import GantryConfig
+from capture.motion.gantry.server import (
     GantryCoordinatorService,
     GantryServerClient,
     GantryServerError,
@@ -20,9 +20,9 @@ from openderm.motion.gantry.server import (
     state_payload,
     x_only_gantry_config,
 )
-from openderm.motion.gantry.state import StateStore, project_position
-from openderm.motion.gantry.manager import MotionError, MotionManager
-from openderm.motion.gantry.moonraker_coordinator import MoonrakerCoordinatorClient
+from capture.motion.gantry.state import StateStore, project_position
+from capture.motion.gantry.manager import MotionError, MotionManager
+from capture.motion.gantry.moonraker_coordinator import MoonrakerCoordinatorClient
 
 
 class FakeMoonraker:
@@ -251,7 +251,7 @@ class MoonrakerCoordinatorTests(unittest.IsolatedAsyncioTestCase):
             stale=False,
         )
         with mock.patch(
-            "openderm.motion.gantry.moonraker_coordinator.time.monotonic", return_value=11.0
+            "capture.motion.gantry.moonraker_coordinator.time.monotonic", return_value=11.0
         ):
             await client._publish_status({"motion_report": {"live_velocity": 10.0}}, stale=False)
         self.assertAlmostEqual(store.get().position["x"], 30.0)
@@ -338,7 +338,7 @@ class ClientTests(unittest.TestCase):
         fake_response.__enter__.return_value = fake_response
         fake_response.__exit__.return_value = False
         with mock.patch(
-            "openderm.motion.gantry.server.request.urlopen", return_value=fake_response
+            "capture.motion.gantry.server.request.urlopen", return_value=fake_response
         ):
             status = client.status()
         self.assertEqual(status["position"]["x"], 12.5)
@@ -354,7 +354,7 @@ class ClientTests(unittest.TestCase):
         fake_response.__enter__.return_value = fake_response
         fake_response.__exit__.return_value = False
         with mock.patch(
-            "openderm.motion.gantry.server.request.urlopen",
+            "capture.motion.gantry.server.request.urlopen",
             return_value=fake_response,
         ) as urlopen:
             client.status()
@@ -367,7 +367,7 @@ class ClientTests(unittest.TestCase):
     def test_client_wraps_network_errors(self) -> None:
         client = GantryServerClient("http://example.test", axis="x")
         with mock.patch(
-            "openderm.motion.gantry.server.request.urlopen", side_effect=error.URLError("boom")
+            "capture.motion.gantry.server.request.urlopen", side_effect=error.URLError("boom")
         ):
             with self.assertRaises(GantryServerError):
                 client.status()
@@ -379,7 +379,7 @@ class ClientTests(unittest.TestCase):
         fake_response.__enter__.return_value = fake_response
         fake_response.__exit__.return_value = False
         with mock.patch(
-            "openderm.motion.gantry.server.request.urlopen", return_value=fake_response
+            "capture.motion.gantry.server.request.urlopen", return_value=fake_response
         ) as urlopen:
             client.move_to(50.0, **move_kwargs)
         sent_request = urlopen.call_args.args[0]
@@ -403,7 +403,7 @@ class ClientTests(unittest.TestCase):
         fake_response.__enter__.return_value = fake_response
         fake_response.__exit__.return_value = False
         with mock.patch(
-            "openderm.motion.gantry.server.request.urlopen",
+            "capture.motion.gantry.server.request.urlopen",
             return_value=fake_response,
         ) as urlopen:
             client.stop()

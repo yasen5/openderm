@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from openderm.config import DEFAULT_GANTRY_SERVER_URL
+from capture.config import DEFAULT_GANTRY_SERVER_URL
 
 DEFAULT_SERVER_URL = os.getenv("GANTRY_SERVER_URL", DEFAULT_GANTRY_SERVER_URL)
 DEFAULT_RX_SERVER_URL = os.getenv("RX_AXIS_SERVER_URL", "http://127.0.0.1:8091")

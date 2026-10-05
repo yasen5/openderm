@@ -28,7 +28,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from openderm.motion.rx_pivot import RxPivotModel, load_jsonl_records
+from capture.motion.rx_pivot import RxPivotModel, load_jsonl_records
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -162,8 +162,8 @@ Processing outputs include `texture.jpg`, `surface_mesh.obj`, `viewer.html`, `pl
 
 ## Repository layout
 
-- `src/openderm/` — hardware control and capture workflows.
-- `src/skinmap/` — 3D registration, artifact detection, and scan comparison.
+- `src/capture/` — hardware control and capture workflows.
+- `src/processing/` — 3D registration, artifact detection, and scan comparison.
 - `src/pico/` — MicroPython Y/Z motion firmware.
 - `src/tests/` — hardware-free unit and simulation tests.
 - `src/scripts/calibration/` — RX-pivot and floor calibration tools.

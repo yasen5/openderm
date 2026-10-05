@@ -5,7 +5,7 @@ import unittest
 from unittest import mock
 
 
-from openderm.config import GantryConfig
+from capture.config import GantryConfig
 
 
 class GantryConfigTests(unittest.TestCase):

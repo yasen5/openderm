@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 import floor_depth_tare as fdt
-from openderm import script_config
+from capture import script_config
 from contour_fake_world import (
     TARGET_MM,
     Z_AT_TARGET,
@@ -29,7 +29,7 @@ from contour_fake_world import (
 
 
 def _run_tare(world, *, sweep=None, settings=None):
-    import openderm.motion.pico.adapter as pico_mod
+    import capture.motion.pico.adapter as pico_mod
 
     class FakeLink:
         def close(self):
