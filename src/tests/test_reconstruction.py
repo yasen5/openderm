@@ -15,23 +15,23 @@ cv2 = pytest.importorskip(
 np = pytest.importorskip("numpy")
 
 from processing import register_scan_3d
-from processing.registration_export import build_mesh
-from processing.registration_features import Frame, Pair, load_frames
+from processing.registration_export import build_surface_mesh
+from processing.registration_features import Frame, Pair, load_scan_camera_frames
 from processing.registration_geometry import (
     RigModel,
-    build_tracks,
-    project,
-    reproj_errors,
-    triangulate,
-    undistort_norm,
+    build_3d_feature_tracks,
+    project_world_points_into_camera,
+    compute_feature_track_reprojection_errors,
+    triangulate_3d_feature_tracks,
+    undistort_image_points_to_normalized_camera,
 )
 from processing.registration_surface import (
     Surface,
     TexParam,
-    fit_surface,
+    fit_surface_heightfield,
     ray_surface_intersect,
 )
-from processing.registration_texture import _write_texture_outputs
+from processing.registration_texture import write_texture_outputs
 
 
 def _frame(
@@ -95,7 +95,7 @@ def test_load_frames_deduplicates_and_uses_only_in_range_sensors(
     (tmp_path / "002.json").write_text(json.dumps(base))
     (tmp_path / "003.json").write_text("{truncated")
 
-    frames = load_frames(str(tmp_path))
+    frames = load_scan_camera_frames(str(tmp_path))
 
     assert len(frames) == 1
     assert frames[0].station == 7
@@ -115,7 +115,7 @@ def test_projection_undistortion_round_trip() -> None:
         ]
     )
 
-    pixels, depth = project(
+    pixels, depth = project_world_points_into_camera(
         points,
         np.eye(3),
         np.zeros(3),
@@ -124,7 +124,7 @@ def test_projection_undistortion_round_trip() -> None:
         model.cx,
         model.cy,
     )
-    normalized = undistort_norm(
+    normalized = undistort_image_points_to_normalized_camera(
         pixels,
         model.fx,
         model.k1,
@@ -162,7 +162,7 @@ def test_tracks_triangulate_back_to_synthetic_landmarks() -> None:
         )
         for i in range(2)
     ]
-    obs_frame, _, obs_track, track_count = build_tracks(frames, pairs, 10)
+    obs_frame, _, obs_track, track_count = build_3d_feature_tracks(frames, pairs, 10)
     assert track_count == 2
     for track in range(track_count):
         assert set(obs_frame[obs_track == track]) == {0, 1, 2}
@@ -181,7 +181,7 @@ def test_tracks_triangulate_back_to_synthetic_landmarks() -> None:
     observation_frames = []
     observation_tracks = []
     for frame_index in range(2):
-        pixels, _ = project(
+        pixels, _ = project_world_points_into_camera(
             landmarks,
             rotations[frame_index],
             centers[frame_index],
@@ -197,7 +197,7 @@ def test_tracks_triangulate_back_to_synthetic_landmarks() -> None:
     observation_tracks = np.asarray(observation_tracks, dtype=np.int32)
     observations = np.concatenate(observations)
 
-    recovered = triangulate(
+    recovered = triangulate_3d_feature_tracks(
         observation_frames,
         observations,
         observation_tracks,
@@ -206,7 +206,7 @@ def test_tracks_triangulate_back_to_synthetic_landmarks() -> None:
         centers,
         model,
     )
-    errors, depths = reproj_errors(
+    errors, depths = compute_feature_track_reprojection_errors(
         recovered,
         observation_frames,
         observations,
@@ -230,7 +230,7 @@ def test_surface_fit_unwrap_and_ray_intersection() -> None:
         axis=1,
     )
 
-    surface, rms = fit_surface(
+    surface, rms = fit_surface_heightfield(
         landmarks,
         bounds=(0.0, 20.0, 0.0, 20.0),
         pitch=5.0,
@@ -268,7 +268,7 @@ def test_mesh_and_texture_outputs_are_complete(tmp_path: Path) -> None:
     surface = Surface(xs, ys, np.zeros((3, 3)))
     parameterization = TexParam(surface)
     coverage = np.ones((11, 11), dtype=np.float32)
-    positions, normals, uv, faces = build_mesh(
+    positions, normals, uv, faces = build_surface_mesh(
         surface,
         parameterization,
         tex_bounds=(0.0, 0.0, 10.0, 10.0),
@@ -295,7 +295,7 @@ def test_mesh_and_texture_outputs_are_complete(tmp_path: Path) -> None:
         ppmm=1.0,
         bounds=(0.0, 0.0, 4.0, 3.0),
     )
-    texture, weights, bounds = _write_texture_outputs(state, str(tmp_path))
+    texture, weights, bounds = write_texture_outputs(state, str(tmp_path))
     assert texture.shape == (3, 4, 3)
     np.testing.assert_array_equal(weights, state.wacc)
     assert bounds == state.bounds
@@ -314,20 +314,20 @@ def test_registration_main_connects_all_pipeline_stages() -> None:
     solution = SimpleNamespace(texture="texture")
 
     with (
-        mock.patch.object(register_scan_3d, "_parse_args", return_value=args),
+        mock.patch.object(register_scan_3d, "parse_scan_cli_arguments", return_value=args),
         mock.patch.object(
             register_scan_3d,
-            "_prepare_problem",
+            "build_scan_reconstruction_problem",
             return_value=problem,
         ) as prepare,
         mock.patch.object(
             register_scan_3d,
-            "_solve_registration",
+            "reconstruct_surface_from_camera_frames",
             return_value=solution,
         ) as solve,
         mock.patch.object(
             register_scan_3d,
-            "_write_registration_outputs",
+            "export_scan_reconstruction_artifacts",
         ) as write,
     ):
         register_scan_3d._main(mem_cap=1234)

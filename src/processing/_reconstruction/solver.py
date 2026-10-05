@@ -7,18 +7,18 @@ from types import SimpleNamespace
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-from ..registration_export import build_mesh
+from ..registration_export import build_surface_mesh
 from ..registration_geometry import (
-    bundle_adjust,
-    bundle_adjust_grouped,
-    reproj_errors,
-    triangulate,
+    bundle_adjust_camera_poses_and_feature_tracks,
+    bundle_adjust_grouped_camera_poses_and_feature_tracks,
+    compute_feature_track_reprojection_errors,
+    triangulate_3d_feature_tracks,
 )
-from ..registration_surface import TexParam, deformable_align, fit_surface
-from ..registration_texture import fit_frame_gains, render_texture
+from ..registration_surface import TexParam, align_frames_with_deformable_surface_warps, fit_surface_heightfield
+from ..registration_texture import estimate_camera_frame_texture_gains, render_surface_texture
 
 
-def _solve_registration(args, problem):
+def reconstruct_surface_from_camera_frames(args, problem):
     """Run bundle adjustment, reject outliers, fit the surface, and render."""
     out_dir = problem.out_dir
     frames = problem.frames
@@ -48,12 +48,12 @@ def _solve_registration(args, problem):
                 "can't fit the rig model); proceeding with the global rig"
             )
         print("[6/9] 3D bundle adjustment (per-row groups + inter-group align)")
-        ba = bundle_adjust_grouped(frames, pairs, mdl, R0, C0, args, frame_group)
+        ba = bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args, frame_group)
     else:
         # global BA; frame_group (if any) still drives the render-side group
         # ownership/LF gates, which don't need per-group pose solves
-        print("[6/9] 3D bundle adjustment (alternating triangulate/resect)")
-        ba = bundle_adjust(frames, pairs, mdl, R0, C0, args)
+        print("[6/9] 3D bundle adjustment (alternating triangulate_3d_feature_tracks/resect)")
+        ba = bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args)
     R, C, X = ba["R"], ba["C"], ba["X"]
 
     # pose deviation from the (re-anchored) proprioception prior
@@ -76,7 +76,7 @@ def _solve_registration(args, problem):
     # low-texture skin, not real motion (breathing and stabilization motion are smaller).
     # Trust the gantry for those frames: snap the pose back to the prior (keeps
     # their texture coverage roughly right) and drop their observations, then
-    # re-triangulate the surviving landmarks from the trustworthy rays only --
+    # re-triangulate_3d_feature_tracks the surviving landmarks from the trustworthy rays only --
     # otherwise a couple of bad frames bend the subject surface into a spike
     # and smear the ortho-texture.
     if args.reject_pose_mm > 0 or args.reject_rot_deg > 0:
@@ -93,10 +93,10 @@ def _solve_registration(args, problem):
             keep = np.array([int(fi) not in bad_set for fi in ba["obs_frame"]], dtype=bool)
             for k in ("obs_frame", "obs_uv", "obs_track"):
                 ba[k] = ba[k][keep]
-            # re-triangulate landmarks that still have >=2 trustworthy views;
+            # re-triangulate_3d_feature_tracks landmarks that still have >=2 trustworthy views;
             # keep the old position for the rest (they are dropped later by the
             # >=3-obs surface-fit gate, but must stay finite for the bounds calc).
-            Xr = triangulate(ba["obs_frame"], ba["obs_uv"], ba["obs_track"], len(X), R, C, mdl)
+            Xr = triangulate_3d_feature_tracks(ba["obs_frame"], ba["obs_uv"], ba["obs_track"], len(X), R, C, mdl)
             nobs_g = np.bincount(ba["obs_track"], minlength=len(X))
             ok = (nobs_g >= 2) & np.isfinite(Xr).all(1)
             X = np.where(ok[:, None], Xr, X)
@@ -110,7 +110,7 @@ def _solve_registration(args, problem):
             )
 
     # standoff sensor agreement
-    err, zc = reproj_errors(X, ba["obs_frame"], ba["obs_uv"], ba["obs_track"], R, C, mdl)
+    err, zc = compute_feature_track_reprojection_errors(X, ba["obs_frame"], ba["obs_uv"], ba["obs_track"], R, C, mdl)
     zc_per = np.full(len(frames), np.nan)
     for f in frames:
         m = ba["obs_frame"] == f.idx
@@ -163,7 +163,7 @@ def _solve_registration(args, problem):
         f"(robust bounds x[{bx0:.0f},{bx1:.0f}] y[{by0:.0f},{by1:.0f}], "
         f">=3-obs tracks)"
     )
-    surf, surf_rms = fit_surface(
+    surf, surf_rms = fit_surface_heightfield(
         X[sel], (bx0, bx1, by0, by1), args.surface_pitch, args.surface_smooth, w0=w_track[sel]
     )
     # Finalize the contour gate from both RX spread and landmark-surface RMS so
@@ -176,7 +176,7 @@ def _solve_registration(args, problem):
     if contour:
         # Refit with stronger smoothing so depth noise and breathing do not turn
         # the broad measured contour into sharp peaks and valleys.
-        surf, _ = fit_surface(
+        surf, _ = fit_surface_heightfield(
             X[sel], (bx0, bx1, by0, by1), args.surface_pitch, args.contour_smooth, w0=w_track[sel]
         )
         print(
@@ -189,13 +189,13 @@ def _solve_registration(args, problem):
     warp = None
     if args.deformable:
         print("      deformable alignment (smooth per-frame map warp)")
-        warp = deformable_align(
+        warp = align_frames_with_deformable_surface_warps(
             frames, pairs, R, C, mdl, surf, tp, reg=args.deformable_reg, order=args.deformable_order
         )
 
     frame_gain = None
     if args.lf_gain != "off":
-        frame_gain = fit_frame_gains(
+        frame_gain = estimate_camera_frame_texture_gains(
             frames,
             mdl,
             ba["obs_frame"],
@@ -206,7 +206,7 @@ def _solve_registration(args, problem):
         )
 
     print("[8/9] rendering ortho-texture")
-    tex, wacc, tex_bounds = render_texture(
+    tex, wacc, tex_bounds = render_surface_texture(
         frames,
         R,
         C,
@@ -228,7 +228,7 @@ def _solve_registration(args, problem):
         device=args.device,
         frame_gain=frame_gain,
     )
-    pos, nrm, uvn, faces = build_mesh(
+    pos, nrm, uvn, faces = build_surface_mesh(
         surf,
         tp,
         tex_bounds,

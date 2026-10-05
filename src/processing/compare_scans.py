@@ -40,12 +40,12 @@ from scipy.ndimage import gaussian_filter
 
 from .alignment import (
     IDENT,
-    apply_T,
-    common_canvas,
-    constellation_check,
-    global_align,
-    match_moles,
-    select_alignment,
+    apply_scan_alignment_transform,
+    compute_shared_texture_canvas,
+    validate_mole_constellation_correspondence,
+    align_scan_textures_globally,
+    match_scan_moles_after_alignment,
+    select_best_scan_alignment,
 )
 from .lesions import (
     detect_moles,
@@ -124,7 +124,7 @@ def main():
             "comparable; alignment leans entirely on features."
         )
 
-    cc = common_canvas(rdA, gA, rdB, gB, args.ppmm)
+    cc = compute_shared_texture_canvas(rdA, gA, rdB, gB, args.ppmm)
     mutual = (cc["covA"] & cc["covB"]).astype(np.uint8)
     print(
         f"[0] common canvas {cc['W']}x{cc['H']} @ {args.ppmm}px/mm  "
@@ -139,7 +139,7 @@ def main():
     detA = cv2.erode(cc["covA"], er)
     detB = cv2.erode(cc["covB"], er)
 
-    _sift, ainfo = global_align(cc["texA"], cc["texB"], cc["covA"], cc["covB"], args.ppmm)
+    _sift, ainfo = align_scan_textures_globally(cc["texA"], cc["texB"], cc["covA"], cc["covB"], args.ppmm)
     if ainfo["T_B_to_A"] is not None:
         print(
             f"[2] alignment: {ainfo['matches']} matches, {ainfo['inliers']} inliers, "
@@ -158,7 +158,7 @@ def main():
     print(f"[4] moles detected: A={len(molesA)}  B={len(molesB)}")
 
     # pick the alignment by mole corroboration + cross-method agreement (shared)
-    al = select_alignment(ainfo, molesA, molesB, args.ppmm, max_resid_mm=args.max_resid_mm)
+    al = select_best_scan_alignment(ainfo, molesA, molesB, args.ppmm, max_resid_mm=args.max_resid_mm)
     T, align_mode, confidence, n_corrob = (al["T"], al["mode"], al["confidence"], al["n_corrob"])
     mole_inl = al["mole_inl"]
     methods_agree, sift_overwhelming = al["methods_agree"], al["sift_overwhelming"]
@@ -178,8 +178,8 @@ def main():
         f"confidence={confidence.upper()}"
     )
 
-    pairs, onlyA, onlyB = match_moles(molesA, molesB, T, args.ppmm, prior_mm)
-    constel = constellation_check(molesA, molesB, pairs, args.ppmm)
+    pairs, onlyA, onlyB = match_scan_moles_after_alignment(molesA, molesB, T, args.ppmm, prior_mm)
+    constel = validate_mole_constellation_correspondence(molesA, molesB, pairs, args.ppmm)
 
     # new/disappeared: gate to mutual coverage AND verify the spot isn't merely
     # sub-threshold in the other scan (exposure differs across scans -> a faint
@@ -192,7 +192,7 @@ def main():
     thrA = mel_threshold(melA_s, detA, args.min_contrast, args.k_sigma)
     disappeared = []
     for i in onlyA:
-        xy = apply_T(Tinv, [[molesA[i]["x"], molesA[i]["y"]]])[0]  # into B frame
+        xy = apply_scan_alignment_transform(Tinv, [[molesA[i]["x"], molesA[i]["y"]]])[0]  # into B frame
         xi, yi = int(round(xy[0])), int(round(xy[1]))
         if not (
             0 <= yi < cc["covB"].shape[0]
@@ -205,7 +205,7 @@ def main():
         disappeared.append(i)
     new = []
     for j in onlyB:
-        xy = apply_T(T, [[molesB[j]["x"], molesB[j]["y"]]])[0]  # into A frame
+        xy = apply_scan_alignment_transform(T, [[molesB[j]["x"], molesB[j]["y"]]])[0]  # into A frame
         xi, yi = int(round(xy[0])), int(round(xy[1]))
         if not (
             0 <= yi < cc["covA"].shape[0]
@@ -223,7 +223,7 @@ def main():
 
     # M2: per matched pair, measure size/shape change in each scan's OWN un-warped
     # frame (the transform is used only to MATCH, never to resample lesion pixels)
-    changes, calib = tm.measure_changes(
+    changes, calib = tm.measure_longitudinal_mole_changes(
         cc, melA, melB, detA, detB, molesA, molesB, pairs, al, args.ppmm
     )
     n_grew = sum(1 for c in changes if c["class"] == "grew")
@@ -347,10 +347,10 @@ def main():
     )
     with open(os.path.join(out, "change_report.json"), "w") as fh:
         json.dump(report, fh, indent=2)
-    tm.write_change_csv(
+    tm.write_mole_change_results_csv(
         os.path.join(out, "change_report.csv"), cc, changes, molesB, molesA, new, disappeared
     )
-    tm.write_change_overlay(
+    tm.render_mole_change_overlay(
         out,
         cc,
         mutual,
@@ -364,7 +364,7 @@ def main():
         args.ppmm,
         labels=(args.scan_a, args.scan_b),
     )
-    tm.write_change_montage(
+    tm.render_mole_change_montage(
         out, cc, changes, molesA, molesB, pairs, T, args.ppmm, labels=(args.scan_a, args.scan_b)
     )
     cv2.imwrite(os.path.join(out, "common_A.jpg"), cc["texA"], [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -432,7 +432,7 @@ def _write_overlay(out, cc, mutual, molesA, molesB, pairs, new, disappeared, T):
         cv2.circle(canvas, (m["x"], m["y"]), int(m["radius_mm"] * cc["ppmm"] + 6), (0, 200, 0), 2)
     for j in new:  # new = red (B coords -> A)
         b = molesB[j]
-        xy = apply_T(T, [[b["x"], b["y"]]])[0]
+        xy = apply_scan_alignment_transform(T, [[b["x"], b["y"]]])[0]
         cv2.circle(
             canvas, (int(xy[0]), int(xy[1])), int(b["radius_mm"] * cc["ppmm"] + 6), (0, 0, 255), 3
         )

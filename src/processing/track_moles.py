@@ -201,7 +201,7 @@ def measure_mole_size(
 # --------------------------------------------------------------------------- #
 # Uncertainty model
 # --------------------------------------------------------------------------- #
-def load_calibration(path=None):
+def load_mole_change_calibration(path=None):
     """Same-scan-null calibration {k, floor_diam, floor_area}; conservative
     defaults if no calibration file exists."""
     import json
@@ -214,7 +214,7 @@ def load_calibration(path=None):
     return dict(k=2.5, floor_diam=0.30, floor_area=None, uncalibrated=True)
 
 
-def detector_sigma(mel, cov, mole, ppmm, n=24, seed=0):
+def estimate_mole_detection_position_sigma(mel, cov, mole, ppmm, n=24, seed=0):
     """Detector-repeatability sigma: std of the size measurement over N rigidly-
     jittered, noise-added copies of the mole's own crop. Uses the scan's own
     robust skin noise, so a fainter/brighter scan gets the appropriately larger
@@ -258,7 +258,7 @@ def detector_sigma(mel, cov, mole, ppmm, n=24, seed=0):
     return out
 
 
-def build_residual_field(corr, ppmm):
+def build_mole_alignment_residual_field(corr, ppmm):
     """Smooth field: A-frame position (px) -> registration sigma (mm), from the
     winning alignment's per-correspondence residual. RBF when SIFT-dense & wide;
     IDW for the sparse mole-constellation; flat 1mm when uncorroborated."""
@@ -284,7 +284,7 @@ def build_residual_field(corr, ppmm):
     return idw
 
 
-def combine_and_flag(sa, sb, da, db, sigma_pos_mm, calib):
+def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, calib):
     """Combine registration + detector + null-floor sigmas in quadrature; classify
     grew/shrank/stable with a significance gate (|z|>=k AND |delta|>=floor)."""
     k = calib.get("k", 2.5)
@@ -330,27 +330,27 @@ def combine_and_flag(sa, sb, da, db, sigma_pos_mm, calib):
     )
 
 
-def assign_lesion_id(uv):
+def assign_stable_mole_lesion_id(uv):
     return f"M{int(round(uv[0]))}_{int(round(uv[1]))}"
 
 
-def measure_changes(cc, melA, melB, detA, detB, molesA, molesB, pairs, al, ppmm, calib=None):
+def measure_longitudinal_mole_changes(cc, melA, melB, detA, detB, molesA, molesB, pairs, al, ppmm, calib=None):
     """Per matched pair: measure size in each scan's OWN un-warped frame, attach
     registration + detector uncertainty, classify change. Returns (list, calib)."""
-    calib = calib or load_calibration()
-    field = build_residual_field(al.get("corr"), ppmm)
+    calib = calib or load_mole_change_calibration()
+    field = build_mole_alignment_residual_field(al.get("corr"), ppmm)
     out = []
     for idx, p in enumerate(pairs):
         mA, mB = molesA[p["iA"]], molesB[p["iB"]]
         sa = measure_mole_size(melA, detA, mA, ppmm, other_moles=molesA)
         sb = measure_mole_size(melB, detB, mB, ppmm, other_moles=molesB)
-        da = detector_sigma(melA, detA, mA, ppmm, seed=1 + idx)
-        db = detector_sigma(melB, detB, mB, ppmm, seed=1001 + idx)
+        da = estimate_mole_detection_position_sigma(melA, detA, mA, ppmm, seed=1 + idx)
+        db = estimate_mole_detection_position_sigma(melB, detB, mB, ppmm, seed=1001 + idx)
         sigma_pos = float(field(np.array([[mA["x"], mA["y"]]]))[0])
-        ch = combine_and_flag(sa, sb, da, db, sigma_pos, calib)
+        ch = combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos, calib)
         u = round(cc["umin"] + mA["x"] / ppmm, 1)
         v = round(cc["vmin"] + mA["y"] / ppmm, 1)
-        ch["id"] = assign_lesion_id((u, v))
+        ch["id"] = assign_stable_mole_lesion_id((u, v))
         ch["uv_a_mm"] = [u, v]
         ch["resid_mm"] = round(p["resid_mm"], 2)
         out.append(ch)
@@ -371,7 +371,7 @@ _CLASS_BGR = {
 _IDENTITY = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 
-def write_change_csv(path, cc, changes, molesB, molesA, newJ, disJ):
+def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ):
     import csv
 
     pp = cc["ppmm"]
@@ -413,7 +413,7 @@ def write_change_csv(path, cc, changes, molesB, molesA, newJ, disJ):
             v = round(cc["vmin"] + molesB[j]["y"] / pp, 1)
             w.writerow(
                 [
-                    assign_lesion_id((u, v)),
+                    assign_stable_mole_lesion_id((u, v)),
                     "new",
                     u,
                     v,
@@ -431,7 +431,7 @@ def write_change_csv(path, cc, changes, molesB, molesA, newJ, disJ):
             v = round(cc["vmin"] + molesA[i]["y"] / pp, 1)
             w.writerow(
                 [
-                    assign_lesion_id((u, v)),
+                    assign_stable_mole_lesion_id((u, v)),
                     "disappeared",
                     u,
                     v,
@@ -446,7 +446,7 @@ def write_change_csv(path, cc, changes, molesB, molesA, newJ, disJ):
             )
 
 
-def write_change_overlay(
+def render_mole_change_overlay(
     out, cc, mutual, changes, molesA, molesB, pairs, newJ, disJ, T, ppmm, labels=("A", "B")
 ):
     base = cc["texA"].copy()
@@ -511,7 +511,7 @@ def _crop(img, cx, cy, half):
     return o
 
 
-def write_change_montage(
+def render_mole_change_montage(
     out, cc, changes, molesA, molesB, pairs, T, ppmm, crop_mm=12.0, labels=("A", "B")
 ):
     half = int(crop_mm / 2 * ppmm)

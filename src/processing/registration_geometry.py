@@ -45,7 +45,7 @@ class RigModel:
         return f.standoff + self.dz0
 
 
-def project(X, Rcw, C, fx, k1, cx, cy):
+def project_world_points_into_camera(X, Rcw, C, fx, k1, cx, cy):
     """World pts (N,3) -> pixel (N,2) + cam-z (N,). Rcw: cam->world 3x3."""
     xc = (X - C) @ Rcw  # = Rcw^T (X - C)
     z = np.maximum(xc[:, 2], 1e-6)
@@ -58,7 +58,7 @@ def project(X, Rcw, C, fx, k1, cx, cy):
     return uv, xc[:, 2]
 
 
-def undistort_norm(uv, fx, k1, cx, cy):
+def undistort_image_points_to_normalized_camera(uv, fx, k1, cx, cy):
     """Pixel (N,2) -> normalised undistorted (N,2)."""
     xn = (uv - [cx, cy]) / fx
     xu = xn.copy()
@@ -68,7 +68,7 @@ def undistort_norm(uv, fx, k1, cx, cy):
     return xu
 
 
-def prefit_rig_model(frames, cpairs, w, h, downscale, fx0) -> tuple[RigModel, float]:
+def estimate_initial_rig_camera_model(frames, cpairs, w, h, downscale, fx0) -> tuple[RigModel, float]:
     """Fit the mechanical rig model from consecutive-pair affine transforms.
 
     The focal-length estimate here is an initialization for the mechanical fit;
@@ -198,19 +198,19 @@ def prefit_rig_model(frames, cpairs, w, h, downscale, fx0) -> tuple[RigModel, fl
 # ----------------------------------------------------------------------------
 # overlap prediction on the (curved) surface
 # ----------------------------------------------------------------------------
-def predicted_pair_translation(mdl, frames, R, C, i, j):
+def predict_frame_pair_translation(mdl, frames, R, C, i, j):
     """Predicted image translation i->j (mean over sample pts) in ds px."""
     w, h = mdl.cx * 2, mdl.cy * 2
     samp = np.array([[mdl.cx, mdl.cy], [w * 0.3, h * 0.3], [w * 0.7, h * 0.7]])
     Zi = mdl.depth(frames[i])
-    xu = undistort_norm(samp, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+    xu = undistort_image_points_to_normalized_camera(samp, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
     xc = np.concatenate([xu * Zi, np.full((len(samp), 1), Zi)], 1)
     Xw = xc @ R[i].T + C[i]
-    uv, _ = project(Xw, R[j], C[j], mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+    uv, _ = project_world_points_into_camera(Xw, R[j], C[j], mdl.fx, mdl.k1, mdl.cx, mdl.cy)
     return (uv - samp).mean(0)
 
 
-def find_overlap_pairs(mdl, frames, R, C, overlap_frac, max_partners):
+def find_overlapping_frame_pairs(mdl, frames, R, C, overlap_frac, max_partners):
     """Predict pairwise overlap by projecting footprints onto the mean plane."""
     n = len(frames)
     w, h = mdl.cx * 2, mdl.cy * 2
@@ -219,7 +219,7 @@ def find_overlap_pairs(mdl, frames, R, C, overlap_frac, max_partners):
     quads = np.zeros((n, 4, 3))
     for f in frames:
         Z = mdl.depth(f)
-        xu = undistort_norm(corners_px, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+        xu = undistort_image_points_to_normalized_camera(corners_px, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
         xc = np.concatenate([xu * Z, np.full((4, 1), Z)], 1)
         quads[f.idx] = xc @ R[f.idx].T + C[f.idx]
         centers[f.idx] = C[f.idx] + Z * R[f.idx][:, 2]
@@ -252,7 +252,7 @@ def find_overlap_pairs(mdl, frames, R, C, overlap_frac, max_partners):
 # ----------------------------------------------------------------------------
 # tracks (union-find over matched keypoints)
 # ----------------------------------------------------------------------------
-def build_tracks(frames, pairs, max_corr_per_pair):
+def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
     t0 = time.time()
     nkp = [len(f.kp) for f in frames]
     off = np.concatenate([[0], np.cumsum(nkp)])
@@ -319,8 +319,8 @@ def build_tracks(frames, pairs, max_corr_per_pair):
 # ----------------------------------------------------------------------------
 # bundle adjustment: alternating intersection / resection
 # ----------------------------------------------------------------------------
-def triangulate(obs_frame, obs_uv, obs_track, ntracks, R, C, mdl):
-    xu = undistort_norm(obs_uv, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+def triangulate_3d_feature_tracks(obs_frame, obs_uv, obs_track, ntracks, R, C, mdl):
+    xu = undistort_image_points_to_normalized_camera(obs_uv, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
     d_cam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
     d_w = np.einsum("nij,nj->ni", R[obs_frame], d_cam)
     d_w /= np.linalg.norm(d_w, axis=1, keepdims=True)
@@ -336,7 +336,7 @@ def triangulate(obs_frame, obs_uv, obs_track, ntracks, R, C, mdl):
     return np.linalg.solve(A, b[..., None])[..., 0]
 
 
-def reproj_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl):
+def compute_feature_track_reprojection_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl):
     Xo = X[obs_track]
     Co = C[obs_frame]
     xc = np.einsum("ni,nij->nj", Xo - Co, R[obs_frame])
@@ -348,7 +348,7 @@ def reproj_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl):
     return err, xc[:, 2]
 
 
-def resect_all(
+def refine_all_camera_poses_from_tracks(
     frames, X, obs_frame, obs_uv, obs_track, R, C, R0, C0, mdl, sigma_px, sigma_t, sigma_r
 ):
     order = np.argsort(obs_frame, kind="stable")
@@ -370,7 +370,7 @@ def resect_all(
         def resid(d):
             Rcw = R0[i] @ Rotation.from_rotvec(d[3:]).as_matrix()
             Cc = C0[i] + d[:3]
-            uv, _ = project(Xi, Rcw, Cc, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+            uv, _ = project_world_points_into_camera(Xi, Rcw, Cc, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
             r = ((uv - uvi) / sigma_px).ravel()
             return np.concatenate([r, d[:3] / sigma_t, d[3:] / sigma_r])
 
@@ -383,7 +383,7 @@ def resect_all(
         print(f"        ({n_small} frames with <20 obs kept at prior pose)")
 
 
-def refine_intrinsics(X, obs_frame, obs_uv, obs_track, R, C, mdl, nsub=80000, fit_k1=False):
+def optimize_camera_intrinsics_from_tracks(X, obs_frame, obs_uv, obs_track, R, C, mdl, nsub=80000, fit_k1=False):
     """Closed-form refit of fx (and optionally k1): uv-c = [xn, xn*r2]@[fx, fx*k1].
 
     k1 fitting is off by default: Canon applies lens corrections to JPGs, and
@@ -420,12 +420,12 @@ def refine_intrinsics(X, obs_frame, obs_uv, obs_track, R, C, mdl, nsub=80000, fi
             mdl.k1 = float(np.clip(float(a[1]) / fx, -0.15, 0.15))
 
 
-def _polar_rot(M):
+def _project_matrix_to_rotation(M):
     U, _, Vt = np.linalg.svd(M)
     return U @ np.diag([1, 1, np.linalg.det(U @ Vt)]) @ Vt
 
 
-def refit_rig_from_poses(frames, R, C, mdl):
+def refit_rig_model_from_camera_poses(frames, R, C, mdl):
     """Re-anchor the rig model on the current BA poses.
 
     The pre-fit (consecutive-pair affines only) carries systematic bias; once
@@ -446,12 +446,12 @@ def refit_rig_from_poses(frames, R, C, mdl):
         lever, *_ = np.linalg.lstsq(A, b, rcond=None)
         # mount rotation given Q
         M = np.einsum("nji,njk->ik", np.einsum("ij,njk->nik", Q, Rrx), R)
-        Rm = _polar_rot(M)
+        Rm = _project_matrix_to_rotation(M)
         # base transform given lever (Kabsch on camera centres)
         Cn = g + np.einsum("nij,j->ni", Rrx, lever)
         mc, mn = C.mean(0), Cn.mean(0)
         H = (Cn - mn).T @ (C - mc)
-        Q = _polar_rot(H.T)
+        Q = _project_matrix_to_rotation(H.T)
         T = mc - Q @ mn
     mdl.lever = lever
     mdl.Rm = Rm
@@ -460,7 +460,7 @@ def refit_rig_from_poses(frames, R, C, mdl):
     return mdl.poses(frames)
 
 
-def resplit_soft_direction(frames, R, C, R0, C0, Zs, sigma_t=1.5, sigma_r_deg=3.0):
+def classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs, sigma_t=1.5, sigma_r_deg=3.0):
     """Re-split each pose deviation along the view-preserving null direction.
 
     With an ~8deg FOV, a sideways camera slide t and a counter-rotation
@@ -491,8 +491,8 @@ def resplit_soft_direction(frames, R, C, R0, C0, Zs, sigma_t=1.5, sigma_r_deg=3.
         R[i] = R0[i] @ Rotation.from_rotvec(rv).as_matrix()
 
 
-def bundle_adjust(frames, pairs, mdl, R0, C0, args):
-    obs_frame, obs_uv, obs_track, ntracks = build_tracks(frames, pairs, args.max_corr_per_pair)
+def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args):
+    obs_frame, obs_uv, obs_track, ntracks = build_3d_feature_tracks(frames, pairs, args.max_corr_per_pair)
     R, C = R0.copy(), C0.copy()
     if ntracks == 0:
         # no usable tracks (e.g. a sparse revisit group with zero intra-group
@@ -526,11 +526,11 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         if rnd == switch and getattr(args, "rig_from", None):
             print("        (rig re-anchor skipped: --rig-from)")
         elif rnd == switch:
-            Xs_ = triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
-            _, zc_ = reproj_errors(Xs_, obs_frame[good], obs_uv[good], obs_track[good], R, C, mdl)
+            Xs_ = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+            _, zc_ = compute_feature_track_reprojection_errors(Xs_, obs_frame[good], obs_uv[good], obs_track[good], R, C, mdl)
             so_ = np.array([frames[i].standoff for i in obs_frame[good]])
             mdl.dz0 = float(np.clip(np.median(zc_ - so_), -20, 600))
-            R0, C0 = refit_rig_from_poses(frames, R, C, mdl)
+            R0, C0 = refit_rig_model_from_camera_poses(frames, R, C, mdl)
             Zs = np.array([mdl.depth(f) for f in frames])
             print(
                 f"        re-anchored rig model: lever="
@@ -540,10 +540,10 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         # loose prior while the anchor still carries pre-fit bias
         st = args.sigma_t * (2.0 if rnd < switch else 1.0)
         sr = sigma_r * (2.0 if rnd < switch else 1.0)
-        X = triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+        X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
         cnt = np.bincount(obs_track[good], minlength=ntracks)
         # reproject ALL obs so early aggressive prunes can be re-admitted
-        err, zc = reproj_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl)
+        err, zc = compute_feature_track_reprojection_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl)
         err[cnt[obs_track] < 2] = np.inf
         rms_pre = float(np.sqrt(np.mean(np.minimum(err[good], 1e6) ** 2)))
         med_pre = float(np.median(err[good]))
@@ -570,7 +570,7 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         )
         history.append(rms_in)
         t_rs = time.time()
-        resect_all(
+        refine_all_camera_poses_from_tracks(
             frames,
             X,
             obs_frame[good],
@@ -587,8 +587,8 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         )
         print(f"        resect {time.time() - t_rs:.0f}s")
         if rnd >= 1 and not args.fx_full:
-            X = triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
-            refine_intrinsics(
+            X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+            optimize_camera_intrinsics_from_tracks(
                 X, obs_frame[good], obs_uv[good], obs_track[good], R, C, mdl, fit_k1=args.fit_k1
             )
             print(
@@ -597,8 +597,8 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
             )
     # re-split the translation/rotation valley to physical values, then one
     # tight-prior polish pass and a second re-split
-    err, _ = reproj_errors(
-        triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl),
+    err, _ = compute_feature_track_reprojection_errors(
+        triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl),
         obs_frame[good],
         obs_uv[good],
         obs_track[good],
@@ -607,9 +607,9 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         mdl,
     )
     med0 = float(np.median(err))
-    resplit_soft_direction(frames, R, C, R0, C0, Zs)
-    X = triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
-    resect_all(
+    classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs)
+    X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+    refine_all_camera_poses_from_tracks(
         frames,
         X,
         obs_frame[good],
@@ -624,9 +624,9 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         1.5,
         math.radians(3.0),
     )
-    resplit_soft_direction(frames, R, C, R0, C0, Zs)
-    err, _ = reproj_errors(
-        triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl),
+    classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs)
+    err, _ = compute_feature_track_reprojection_errors(
+        triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl),
         obs_frame[good],
         obs_uv[good],
         obs_track[good],
@@ -639,9 +639,9 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
         f"{med0:.2f} -> {float(np.median(err)):.2f}px"
     )
     # final
-    X = triangulate(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+    X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
     cnt = np.bincount(obs_track[good], minlength=ntracks)
-    err, zc = reproj_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl)
+    err, zc = compute_feature_track_reprojection_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl)
     err[cnt[obs_track] < 2] = np.inf
     zlo, zhi = 0.4 * Zs[obs_frame], 2.5 * Zs[obs_frame]
     good = (err < max(3.0, 6.0 * float(np.median(err[good])))) & (zc > zlo) & (zc < zhi)
@@ -674,7 +674,7 @@ def bundle_adjust(frames, pairs, mdl, R0, C0, args):
     )
 
 
-def bundle_adjust_grouped(frames, pairs, mdl, R0, C0, args, group_of):
+def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args, group_of):
     """Breathing-robust registration. The skin deforms between scan passes, so a
     single rigid bundle can't explain frames captured minutes apart -- it puts
     cross-pass features at compromise 3D positions, which then ghost in the
@@ -685,7 +685,7 @@ def bundle_adjust_grouped(frames, pairs, mdl, R0, C0, args, group_of):
     single; between groups, breathing becomes a small shift the alignment removes
     and the group-owned texture compositing renders once instead of doubling.
 
-    group_of: dict frame.idx -> group id. Returns the bundle_adjust dict shape."""
+    group_of: dict frame.idx -> group id. Returns the bundle_adjust_camera_poses_and_feature_tracks dict shape."""
     gids = sorted(set(group_of.values()))
     intra = {g: [] for g in gids}
     cross = []
@@ -709,7 +709,7 @@ def bundle_adjust_grouped(frames, pairs, mdl, R0, C0, args, group_of):
     for g in gids:
         ng = sum(1 for i in group_of if group_of[i] == g)
         print(f"      -- group {g}: {ng} frames, {len(intra[g])} intra-pairs")
-        ba = bundle_adjust(frames, intra[g], mdl, R0, C0, args)
+        ba = bundle_adjust_camera_poses_and_feature_tracks(frames, intra[g], mdl, R0, C0, args)
         for i in group_of:
             if group_of[i] == g:
                 R[i] = ba["R"][i]
@@ -781,7 +781,7 @@ def bundle_adjust_grouped(frames, pairs, mdl, R0, C0, args, group_of):
     obs_uv = np.concatenate(ouv)
     obs_track = np.concatenate(otr).astype(np.int32)
     track_err = np.concatenate(terr)
-    err, _ = reproj_errors(Xg, obs_frame, obs_uv, obs_track, R, C, mdl)
+    err, _ = compute_feature_track_reprojection_errors(Xg, obs_frame, obs_uv, obs_track, R, C, mdl)
     rms = float(np.sqrt(np.mean(err**2)))
     print(
         f"      grouped final: {len(gids)} groups, {len(Xg)} landmarks, "

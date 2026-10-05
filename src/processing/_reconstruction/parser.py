@@ -38,7 +38,7 @@ from __future__ import annotations
 import argparse
 
 
-def _parse_args():
+def parse_scan_cli_arguments():
     """Parse registration CLI arguments without running the processing pipeline."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -182,7 +182,7 @@ def _parse_args():
         choices=("on", "field", "off"),
         default="off",
         help="per-frame photometric gain compensation fitted from "
-        "BA track colors (fit_frame_gains). The lamp travels "
+        "BA track colors (estimate_camera_frame_texture_gains). The lamp travels "
         "with the camera, so frames render the same skin up "
         "to ~40 gray levels apart; the LF cross-fade then "
         "shows blocky tone steps at feather/group-gate "

@@ -6,7 +6,7 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from .registration_geometry import undistort_norm
+from .registration_geometry import undistort_image_points_to_normalized_camera
 
 
 # ----------------------------------------------------------------------------
@@ -55,7 +55,7 @@ class Surface:
         return self.support[yi, xi]
 
 
-def fit_surface(X, bounds, pitch, smooth, robust_iters=3, w0=None):
+def fit_surface_heightfield(X, bounds, pitch, smooth, robust_iters=3, w0=None):
     x0, x1, y0, y1 = bounds
     xs = np.arange(x0, x1 + pitch, pitch)
     ys = np.arange(y0, y1 + pitch, pitch)
@@ -191,7 +191,7 @@ def ray_surface_intersect(Cw, dirs, surf: Surface, t0, iters=8):
     return Cw + dirs * t[:, None]
 
 
-def frame_footprint_world(f, R, C, mdl, surf, n_edge=6):
+def compute_camera_frame_surface_footprint(f, R, C, mdl, surf, n_edge=6):
     """Footprint polygon on the surface (world pts), sampled along edges."""
     w, h = mdl.cx * 2, mdl.cy * 2
     ts = np.linspace(0, 1, n_edge, endpoint=False)
@@ -201,7 +201,7 @@ def frame_footprint_world(f, R, C, mdl, surf, n_edge=6):
         for t in ts:
             edges.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
     edges = np.array(edges)
-    xu = undistort_norm(edges, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+    xu = undistort_image_points_to_normalized_camera(edges, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
     d_cam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
     d_w = d_cam @ R[f.idx].T
     d_w /= np.linalg.norm(d_w, axis=1, keepdims=True)
@@ -211,7 +211,9 @@ def frame_footprint_world(f, R, C, mdl, surf, n_edge=6):
 # ----------------------------------------------------------------------------
 # deformable alignment (breathing): smooth per-frame warp in the unwrapped map
 # ----------------------------------------------------------------------------
-def deformable_align(frames, pairs, R, C, mdl, surf, tp, reg=2.0, max_per_pair=200, order=1):
+def align_frames_with_deformable_surface_warps(
+    frames, pairs, R, C, mdl, surf, tp, reg=2.0, max_per_pair=200, order=1
+):
     """Remove the residual breathing misalignment that makes stitch seams cross
     moles. Each overlapping pair gives feature correspondences that the rigid
     registration places at slightly different (u,v) on the unwrapped map (the
@@ -228,7 +230,7 @@ def deformable_align(frames, pairs, R, C, mdl, surf, tp, reg=2.0, max_per_pair=2
     n = len(frames)
 
     def to_uv(pts, fi):
-        xu = undistort_norm(pts.astype(float), mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+        xu = undistort_image_points_to_normalized_camera(pts.astype(float), mdl.fx, mdl.k1, mdl.cx, mdl.cy)
         dcam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
         dw = dcam @ R[fi].T
         dw /= np.linalg.norm(dw, axis=1, keepdims=True)
@@ -277,7 +279,7 @@ def deformable_align(frames, pairs, R, C, mdl, surf, tp, reg=2.0, max_per_pair=2
     # only). The quadratic warp gets denser anchors: 6 params/axis need
     # well-spread samples to stay bounded across the whole footprint.
     for f in frames:
-        fp = frame_footprint_world(f, R, C, mdl, surf)
+        fp = compute_camera_frame_surface_footprint(f, R, C, mdl, surf)
         fu, fv = tp.to_uv(fp[:, 0], fp[:, 1])
         for c in range(0, len(fu), max(1, len(fu) // (4 if nb == 3 else 10))):
             bb = basis(fu[c] - umid, fv[c] - vmid)

@@ -11,7 +11,7 @@ frames, which are ground truth (a raw photo shows each feature exactly once):
     - re-detect blobs LOCALLY in the composite crop (catches close doubles the
       global detector's 2.5mm suppression merges);
     - if >=2 composite blobs, find every source frame that imaged that surface
-      point, project the composite blobs into each, and detect the real blobs;
+      point, project_world_points_into_camera the composite blobs into each, and detect the real blobs;
     - two composite blobs are the SAME feature (a ghost) unless a MAJORITY of the
       covering source frames resolve them as TWO separate blobs.
   ghost_excess = (#composite blobs with source support) - (#distinct real features).
@@ -38,11 +38,11 @@ from processing.lesions import (
     mel_threshold,
     melanin_flat,
 )
-from processing.register_scan_3d import project
+from processing.register_scan_3d import project_world_points_into_camera
 
 
 # --------------------------------------------------------------------------- #
-def local_peaks(
+def detect_local_lesion_candidate_peaks(
     chan, ppmm, mask=None, diam_mm=(0.3, 4.0), k_sigma=4.0, min_contrast=0.05, suppress_mm=0.8
 ):
     """Positive-bump detector (multiscale LoG) with a SMALL NMS radius so two
@@ -72,7 +72,7 @@ def local_peaks(
     return out
 
 
-def detect_on(bgr, ppmm, channel, mask=None):
+def detect_source_frame_lesions(bgr, ppmm, channel, mask=None):
     """Real lesion detections (calibrated + red-hue gate for angiomas), the SAME
     definition of 'a feature' used everywhere. Returns [(x, y, r_mm)]."""
     if mask is None:
@@ -86,15 +86,15 @@ def detect_on(bgr, ppmm, channel, mask=None):
     return [(f["x"], f["y"], f["radius_mm"]) for f in feats]
 
 
-def build_uv_to_world(reg_dir, g):
+def build_texture_uv_to_world_interpolator(reg_dir, g):
     """Interpolator (u_mm, v_mm) -> world (x,y,z) from the exported mesh UVs."""
     V, VT = _parse_obj_v_vt(os.path.join(reg_dir, "surface_mesh.obj"))
-    u = g.umin + VT[:, 0] * (g.umax - g.umin)  # invert build_mesh's VT
+    u = g.umin + VT[:, 0] * (g.umax - g.umin)  # invert build_surface_mesh's VT
     v = g.vmin + (1.0 - VT[:, 1]) * (g.vmax - g.vmin)
     return LinearNDInterpolator(np.column_stack([u, v]), V)
 
 
-def load_rig(reg_dir):
+def load_reconstruction_rig_and_frames(reg_dir):
     pl = json.load(open(os.path.join(reg_dir, "placements3d.json")))
     r, ds = pl["rig_model"], pl["downscale"]
     K = dict(
@@ -120,15 +120,15 @@ def load_rig(reg_dir):
     return K, frames
 
 
-def project_pt(P, f, K):
-    uv, z = project(np.atleast_2d(P), f["R"], f["C"], K["fxf"], K["k1"], K["cxf"], K["cyf"])
+def project_world_point_into_source_frame(P, f, K):
+    uv, z = project_world_points_into_camera(np.atleast_2d(P), f["R"], f["C"], K["fxf"], K["k1"], K["cxf"], K["cyf"])
     return float(uv[0][0]), float(uv[0][1]), float(z[0])
 
 
 _IMG: dict = {}
 
 
-def load_src(path, ds):
+def load_downscaled_source_frame(path, ds):
     key = (path, ds)
     if key not in _IMG:
         im = cv2.imread(path)
@@ -139,7 +139,7 @@ def load_src(path, ds):
 
 
 # --------------------------------------------------------------------------- #
-def analyse(reg_dir, args):
+def analyze_reconstruction_ghosts(reg_dir, args):
     import time
 
     t0 = time.time()
@@ -151,9 +151,9 @@ def analyse(reg_dir, args):
     ppmm = g.ppmm
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
     cov = coverage_mask(reg_dir)
-    K, frames = load_rig(reg_dir)
+    K, frames = load_reconstruction_rig_and_frames(reg_dir)
     log(f"loaded texture {tex.shape[1]}x{tex.shape[0]} @ {ppmm:.0f}px/mm")
-    uv2w = build_uv_to_world(reg_dir, g)
+    uv2w = build_texture_uv_to_world_interpolator(reg_dir, g)
     log("built (u,v)->world interpolator")
 
     # global candidate hunt on a DOWNSCALED texture (locations only; precise
@@ -235,7 +235,7 @@ def analyse(reg_dir, args):
         Pc = np.mean(cworld, axis=0)
         cover = []
         for f in frames:
-            px, py, z = project_pt(Pc, f, K)
+            px, py, z = project_world_point_into_source_frame(Pc, f, K)
             if z > 10 and 10 <= px < K["Wf"] - 10 and 10 <= py < K["Hf"] - 10:
                 cover.append((f, np.hypot(px - K["cxf"], py - K["cyf"])))
         cover.sort(key=lambda t: t[1])
@@ -252,11 +252,11 @@ def analyse(reg_dir, args):
             # threshold at full res is averaged away, so the calibrated detectors
             # behave as they do on the composite.
             sds = max(1, round(K["fxf"] / f["standoff"] / args.src_ppmm))
-            im = load_src(f["path"], sds)
+            im = load_downscaled_source_frame(f["path"], sds)
             if im is None:
                 continue
             ppmm_s = K["fxf"] / f["standoff"] / sds
-            preds = [project_pt(w, f, K) for w in cworld]
+            preds = [project_world_point_into_source_frame(w, f, K) for w in cworld]
             xs = [p[0] / sds for p in preds]
             ys = [p[1] / sds for p in preds]
             mrg = int(args.src_pad_mm * ppmm_s)
@@ -266,7 +266,7 @@ def analyse(reg_dir, args):
             sy1 = int(min(im.shape[0], max(ys) + mrg))
             if sx1 - sx0 < 5 or sy1 - sy0 < 5:
                 continue
-            sblobs = detect_on(im[sy0:sy1, sx0:sx1], ppmm_s, ch)
+            sblobs = detect_source_frame_lesions(im[sy0:sy1, sx0:sx1], ppmm_s, ch)
             tol = args.match_mm * ppmm_s
             assign = []
             for px, py, z in preds:
@@ -343,7 +343,7 @@ def analyse(reg_dir, args):
 
 
 # --------------------------------------------------------------------------- #
-def write_outputs(res, out_dir):
+def write_reconstruction_ghost_reports(res, out_dir):
     os.makedirs(os.path.join(out_dir, "montage"), exist_ok=True)
     tex, g = res["tex"], res["g"]
     ov = tex.copy()
@@ -384,7 +384,7 @@ def write_outputs(res, out_dir):
             )
         tiles = [_label(cv2.resize(cc, (280, 280)), "COMPOSITE")]
         for pf in r["per_frame"][:4]:
-            im = load_src(_path_for(res, pf["idx"]), pf["sds"])
+            im = load_downscaled_source_frame(_path_for(res, pf["idx"]), pf["sds"])
             if im is None:
                 continue
             sx0, sy0, sx1, sy1 = pf["crop"]
@@ -480,10 +480,10 @@ def main():
     args = ap.parse_args()
     reg_dir = args.reg_dir.rstrip("/")
     out_dir = args.out or os.path.join(reg_dir, "ghost-check")
-    _, frames = load_rig(reg_dir)
-    res = analyse(reg_dir, args)
+    _, frames = load_reconstruction_rig_and_frames(reg_dir)
+    res = analyze_reconstruction_ghosts(reg_dir, args)
     res["_paths"] = [(f["idx"], f["path"]) for f in frames]
-    write_outputs(res, out_dir)
+    write_reconstruction_ghost_reports(res, out_dir)
     doublings = sum(1 for r in res["records"] if r["n_comp_blobs"] >= 2)
     print(
         f"DOUBLINGS: {doublings} region(s) where the composite shows >=2 "

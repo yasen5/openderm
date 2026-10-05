@@ -11,20 +11,20 @@ from __future__ import annotations
 
 import sys
 
-from ._reconstruction.exporter import _write_registration_outputs
-from ._reconstruction.parser import _parse_args
-from ._reconstruction.problem import _prepare_problem
-from ._reconstruction.solver import _solve_registration
-from .registration_features import _self_limit_memory
-from .registration_geometry import project
+from ._reconstruction.exporter import export_scan_reconstruction_artifacts
+from ._reconstruction.parser import parse_scan_cli_arguments
+from ._reconstruction.problem import build_scan_reconstruction_problem
+from ._reconstruction.solver import reconstruct_surface_from_camera_frames
+from .registration_features import _apply_processing_memory_limit
+from .registration_geometry import project_world_points_into_camera
 
-__all__ = ["main", "project"]
+__all__ = ["main", "project_world_points_into_camera"]
 
 
 def main():
     # The box is shared: a runaway allocation must kill this process cleanly,
     # never invoke the kernel OOM killer on other users.
-    cap = _self_limit_memory()
+    cap = _apply_processing_memory_limit()
     try:
         return _main(cap)
     except MemoryError:
@@ -36,10 +36,10 @@ def main():
 
 
 def _main(mem_cap=None):
-    args = _parse_args()
-    problem = _prepare_problem(args, mem_cap)
-    solution = _solve_registration(args, problem)
-    _write_registration_outputs(args, problem, solution)
+    args = parse_scan_cli_arguments()
+    problem = build_scan_reconstruction_problem(args, mem_cap)
+    solution = reconstruct_surface_from_camera_frames(args, problem)
+    export_scan_reconstruction_artifacts(args, problem, solution)
 
 
 if __name__ == "__main__":

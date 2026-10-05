@@ -14,7 +14,7 @@ except ImportError as exc:  # pragma: no cover - depends on the optional vision 
     ) from exc
 
 from processing.tex_anchor import coverage_mask, load_gauge
-from processing.track_moles import write_change_overlay
+from processing.track_moles import render_mole_change_overlay
 
 
 def _write_placements(registration_dir: Path, *, include_texture: bool = True) -> None:
@@ -75,7 +75,7 @@ class ChangeOverlayTests(unittest.TestCase):
     def test_new_lesion_overlay_supports_gantry_only_alignment(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             canvas = np.full((80, 120, 3), 100, dtype=np.uint8)
-            write_change_overlay(
+            render_mole_change_overlay(
                 tmp,
                 {"texA": canvas},
                 np.ones(canvas.shape[:2], dtype=np.uint8),

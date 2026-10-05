@@ -1,4 +1,4 @@
-"""GPU (torch/CUDA) fast path for render_texture's per-frame image pipeline.
+"""GPU (torch/CUDA) fast path for render_surface_texture's per-frame image pipeline.
 
 Division of labour: the geometry fields stay on CPU (decimated ~20px/mm grid,
 cheap), the texture CANVASES stay in system RAM (VRAM must not bound canvas
@@ -41,7 +41,7 @@ except Exception:  # torch not installed
 import cv2
 
 
-def gpu_available() -> bool:
+def texture_gpu_renderer_available() -> bool:
     return _TORCH and torch.cuda.is_available()
 
 
@@ -52,7 +52,7 @@ class GpuOom(RuntimeError):
 
 class GpuGeom:
     """Per-frame geometry-field evaluation on CUDA, mirroring the numpy math
-    of render_texture's geom() (bilinear surface interps, the arc-length
+    of render_surface_texture's geom() (bilinear surface interps, the arc-length
     unwrap and its Newton inverse, projection, feather x centre x incidence
     weights). Coordinates run in float64 exactly like numpy; the returned
     field stack is float32 like the CPU path's final cast."""
@@ -520,7 +520,7 @@ class GpuFramePipe:
             mapy = mapy * sscale
         col = self._sample(im, mapx, mapy)  # (3,h,w) BGR
         if gain is not None:
-            # per-frame photometric gain (fit_frame_gains): (3,) scalar per
+            # per-frame photometric gain (estimate_camera_frame_texture_gains): (3,) scalar per
             # channel, or (3,3) affine log-gain field [ch,(g0,gx,gy)] in
             # normalised image coords. Scales the whole frame, so lo and hf
             # inherit it consistently below.

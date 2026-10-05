@@ -37,7 +37,7 @@ class Frame:
     shape: tuple = None
 
 
-def load_frames(
+def load_scan_camera_frames(
     capture_dir: str,
     limit_rows: int = 0,
     row_range: tuple[int, int] | None = None,
@@ -121,7 +121,7 @@ def load_frames(
 # ----------------------------------------------------------------------------
 # feature extraction + pairwise matching (CLAHE-SIFT, same recipe as 2D script)
 # ----------------------------------------------------------------------------
-def _mem_available_bytes() -> float:
+def _get_available_system_memory_bytes() -> float:
     """MemAvailable from /proc/meminfo; +inf when unreadable (non-Linux)."""
     try:
         with open("/proc/meminfo") as fh:
@@ -133,16 +133,16 @@ def _mem_available_bytes() -> float:
     return float("inf")
 
 
-def _self_limit_memory(frac: float = 0.7, budget: int | None = None):
+def _apply_processing_memory_limit(frac: float = 0.7, budget: int | None = None):
     """Cap THIS process's data segment (heap + anonymous mmaps) so a runaway
     allocation dies here with a MemoryError instead of driving the kernel OOM
-    killer into other users' processes (a full-res extract pool once swapped
+    killer into other users' processes (a full-res extract_camera_frame_sift_keypoints pool once swapped
     the box and took out every tmux session on it). Returns the cap or None."""
     try:
         import resource
 
         if budget is None:
-            avail = _mem_available_bytes()
+            avail = _get_available_system_memory_bytes()
             if not math.isfinite(avail):
                 return None
             vmdata = 0.0
@@ -168,14 +168,14 @@ class _KPt:
         self.pt = pt
 
 
-def _extract_one(path: str, downscale: int, nfeatures: int, mem_budget: int | None = None):
+def _extract_camera_frame_sift_keypoints(path: str, downscale: int, nfeatures: int, mem_budget: int | None = None):
     """One frame's CLAHE-SIFT; module-level so a process pool can run it.
     Returns (pts float32 (N,2), des float32 (N,128), shape)."""
     cv2.setNumThreads(1)  # the pool is the parallelism
     if mem_budget:
         # A worker that outgrows its share dies alone with MemoryError so the
         # caller can fall back to serial extraction.
-        _self_limit_memory(budget=mem_budget)
+        _apply_processing_memory_limit(budget=mem_budget)
     # IGNORE_ORIENTATION: the camera mount never rotates, but the Canon's
     # orientation sensor flips the EXIF auto-rotate tag mid-scan as rx
     # tilts past ~45deg -- honouring it feeds the pipeline a mix of
@@ -195,7 +195,7 @@ def _extract_one(path: str, downscale: int, nfeatures: int, mem_budget: int | No
     return pts, des, g.shape
 
 
-def extract(frames: list[Frame], downscale: int, nfeatures: int) -> None:
+def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfeatures: int) -> None:
     """CLAHE-SIFT for every frame, fanned out over a process pool (identical
     per-frame results to the serial path; SIFT itself is deterministic)."""
     t0 = time.time()
@@ -258,7 +258,7 @@ def extract(frames: list[Frame], downscale: int, nfeatures: int) -> None:
                 ) as ex:
                     results = list(
                         ex.map(
-                            _extract_one,
+                            _extract_camera_frame_sift_keypoints,
                             [f.image_path for f in frames],
                             [downscale] * len(frames),
                             [nfeatures] * len(frames),
@@ -273,10 +273,10 @@ def extract(frames: list[Frame], downscale: int, nfeatures: int) -> None:
                     else:
                         os.environ[k] = v
         except Exception as e:  # pool unavailable: go serial
-            print(f"  ! extract pool failed ({e}); extracting serially")
+            print(f"  ! extract_camera_frame_sift_keypoints pool failed ({e}); extracting serially")
             results = None
     if results is None:
-        results = [_extract_one(f.image_path, downscale, nfeatures) for f in frames]
+        results = [_extract_camera_frame_sift_keypoints(f.image_path, downscale, nfeatures) for f in frames]
     for f, (pts, des, shape) in zip(frames, results):
         f.gray = None  # unused downstream; skip the RAM
         f.shape = shape
@@ -305,19 +305,19 @@ class Pair:
     dst_kp: np.ndarray
 
 
-def _flann():
+def _create_feature_matching_flann_index():
     return cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=64))
 
 
 _GPU_MATCHER = None  # set by main() when --device cuda
 
 
-def set_gpu_matcher(m) -> None:
+def configure_gpu_feature_matcher(m) -> None:
     global _GPU_MATCHER
     _GPU_MATCHER = m
 
 
-def match_pair(
+def match_camera_frame_pair_keypoints(
     fi: Frame, fj: Frame, ratio: float, min_inliers: int, prior_xy=None, prior_tol: float = 0.0
 ) -> Pair | None:
     if fi.des is None or fj.des is None or len(fi.kp) < 2 or len(fj.kp) < 2:
@@ -327,7 +327,7 @@ def match_pair(
         k1i = np.where(d1 < ratio * d2)[0].astype(np.int32)
         k2i = nn1[k1i].astype(np.int32)
     else:
-        knn = _flann().knnMatch(fi.des, fj.des, k=2)
+        knn = _create_feature_matching_flann_index().knnMatch(fi.des, fj.des, k=2)
         good = [m for m, n in (p for p in knn if len(p) == 2) if m.distance < ratio * n.distance]
         k1i = np.int32([m.queryIdx for m in good])
         k2i = np.int32([m.trainIdx for m in good])

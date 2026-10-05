@@ -10,14 +10,14 @@ import numpy as np
 
 from ..registration_export import (
     RECOMMENDATIONS,
-    export_landmarks_ply,
-    export_obj,
-    export_viewer,
-    make_overview_png,
+    export_surface_landmarks_ply,
+    export_surface_mesh_obj,
+    export_surface_viewer_html,
+    render_reconstruction_overview_png,
 )
 
 
-def _write_registration_outputs(args, problem, solution):
+def export_scan_reconstruction_artifacts(args, problem, solution):
     """Write meshes, diagnostics, placements, and the human-readable report."""
     out_dir = problem.out_dir
     frames = problem.frames
@@ -45,9 +45,9 @@ def _write_registration_outputs(args, problem, solution):
     dzfit = solution.dzfit
     so_rms = solution.so_rms
     print("[9/9] writing outputs")
-    export_obj(out_dir, pos, nrm, uvn, faces)
-    export_landmarks_ply(out_dir, X, ba["track_err"])
-    make_overview_png(out_dir, frames, R, C, mdl, surf, X)
+    export_surface_mesh_obj(out_dir, pos, nrm, uvn, faces)
+    export_surface_landmarks_ply(out_dir, X, ba["track_err"])
+    render_reconstruction_overview_png(out_dir, frames, R, C, mdl, surf, X)
 
     rms_mm = ba["rms"] / (mdl.fx / np.mean([mdl.depth(f) for f in frames]))
     area_cm2 = (wacc > 0).sum() / (args.texture_ppmm**2) / 100.0
@@ -60,7 +60,7 @@ def _write_registration_outputs(args, problem, solution):
         px_per_mm=f"{mdl.fx * args.downscale / np.mean([mdl.depth(f) for f in frames]):.0f}",
         area_cm2=f"{area_cm2:.0f}",
     )
-    export_viewer(out_dir, frames, R, C, mdl, pos, uvn, faces, X, ba["track_err"], stats)
+    export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, ba["track_err"], stats)
 
     placements = dict(
         capture_dir=args.capture_dir,

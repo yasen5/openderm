@@ -11,13 +11,15 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .registration_geometry import undistort_norm
+from .registration_geometry import undistort_image_points_to_normalized_camera
 
 
 # ----------------------------------------------------------------------------
 # mesh build + exports
 # ----------------------------------------------------------------------------
-def build_mesh(surf, tp, tex_bounds, wacc, ppmm, mesh_pitch, up_sign, mesh_smooth=(0.0, 0.0)):
+def build_surface_mesh(
+    surf, tp, tex_bounds, wacc, ppmm, mesh_pitch, up_sign, mesh_smooth=(0.0, 0.0)
+):
     umin, vmin, umax, vmax = tex_bounds
     us = np.arange(umin, umax + mesh_pitch, mesh_pitch)
     vs = np.arange(vmin, vmax + mesh_pitch, mesh_pitch)
@@ -80,7 +82,7 @@ def build_mesh(surf, tp, tex_bounds, wacc, ppmm, mesh_pitch, up_sign, mesh_smoot
     return pos, nrm, uvn, faces
 
 
-def export_obj(out_dir, pos, nrm, uvn, faces):
+def export_surface_mesh_obj(out_dir, pos, nrm, uvn, faces):
     mtl = os.path.join(out_dir, "surface_mesh.mtl")
     with open(mtl, "w") as fh:
         fh.write("newmtl skin\nKa 1 1 1\nKd 1 1 1\nKs 0 0 0\nmap_Kd texture.jpg\n")
@@ -111,7 +113,7 @@ def export_obj(out_dir, pos, nrm, uvn, faces):
     print(f"      wrote {objp}")
 
 
-def export_landmarks_ply(out_dir, X, track_err):
+def export_surface_landmarks_ply(out_dir, X, track_err):
     e = np.clip(track_err / max(track_err.max(), 1e-6), 0, 1)
     col = np.stack([(e * 255), (1 - e) * 255, np.zeros_like(e)], 1).astype(np.uint8)
     path = os.path.join(out_dir, "landmarks.ply")
@@ -132,7 +134,7 @@ def export_landmarks_ply(out_dir, X, track_err):
     print(f"      wrote {path}")
 
 
-def make_overview_png(out_dir, frames, R, C, mdl, surf, X):
+def render_reconstruction_overview_png(out_dir, frames, R, C, mdl, surf, X):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -179,7 +181,7 @@ def _b64(arr) -> str:
     return base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode()
 
 
-def export_viewer(out_dir, frames, R, C, mdl, pos, uvn, faces, X, track_err, stats):
+def export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, track_err, stats):
     repo_libraries = Path(__file__).resolve().parents[2] / "third_party" / "threejs"
     installed_libraries = (
         Path(sysconfig.get_path("data")) / "share" / "openderm" / "third_party" / "threejs"
@@ -225,7 +227,7 @@ def export_viewer(out_dir, frames, R, C, mdl, pos, uvn, faces, X, track_err, sta
     cpx = np.array([[0, 0], [w, 0], [w, h], [0, h]], float)
     for f in frames:
         Z = mdl.depth(f) * 0.35
-        xu = undistort_norm(cpx, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+        xu = undistort_image_points_to_normalized_camera(cpx, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
         xc = np.concatenate([xu * Z, np.full((4, 1), Z)], 1)
         cw = xc @ R[f.idx].T + C[f.idx]
         t = (f.row - rows.min()) / rspan

@@ -26,10 +26,10 @@ from processing.lesions import (
     hemoglobin_flat,
     melanin_flat,
 )
-from processing.ghost_check import load_rig, build_uv_to_world, project_pt, load_src
+from processing.ghost_check import load_reconstruction_rig_and_frames, build_texture_uv_to_world_interpolator, project_world_point_into_source_frame, load_downscaled_source_frame
 
 
-def matched_z(im, px, py, ppmm_s, channel):
+def measure_source_feature_contrast_zscore(im, px, py, ppmm_s, channel):
     """Feature-vs-skin z-score at a KNOWN pixel: how much darker (mole) or redder
     (angioma) the spot is than its own local skin ring, in robust-sigma units.
     Robust to raw-frame pore noise because it's a local contrast at a fixed
@@ -61,7 +61,7 @@ def matched_z(im, px, py, ppmm_s, channel):
     return (float(np.median(disk)) - rmed) / mad
 
 
-def seeds(tex, cov, ppmm, k_sigma):
+def detect_texture_doubling_candidates(tex, cov, ppmm, k_sigma):
     er = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * ppmm) | 1,) * 2)
     dm = cv2.erode(cov, er)
     mel = melanin_flat(tex, cov, ppmm)
@@ -76,13 +76,13 @@ def seeds(tex, cov, ppmm, k_sigma):
     return s, dm
 
 
-def find(reg_dir, args):
+def find_texture_doublings(reg_dir, args):
     g = load_gauge(reg_dir)
     ppmm = g.ppmm
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
     cov = coverage_mask(reg_dir)
     gray = cv2.cvtColor(tex, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    cand, dm = seeds(tex, cov, ppmm, args.k_sigma)
+    cand, dm = detect_texture_doubling_candidates(tex, cov, ppmm, args.k_sigma)
     covm = dm > 0
     print(f"  {len(cand)} seed features @ {ppmm:.0f}px/mm", flush=True)
 
@@ -134,7 +134,7 @@ def find(reg_dir, args):
     return dict(g=g, tex=tex, ppmm=ppmm, pairs=uniq, n_seeds=len(cand))
 
 
-def write(res, out_dir):
+def write_texture_doubling_reports(res, out_dir):
     os.makedirs(os.path.join(out_dir, "pairs"), exist_ok=True)
     tex, ppmm = res["tex"], res["ppmm"]
     ov = tex.copy()
@@ -174,14 +174,14 @@ def write(res, out_dir):
     cv2.imwrite(os.path.join(out_dir, "doublings_overlay.png"), ov)
 
 
-def confirm(res, reg_dir, args):
+def confirm_texture_doublings_from_source_frames(res, reg_dir, args):
     """For each NCC candidate pair A<->B, use the SOURCE frames as ground truth:
     if it's one real feature doubled, NO single frame can show a strong feature
     at BOTH placements; two genuinely-distinct lesions appear at both in most
     covering frames. Returns pairs with a verdict + evidence."""
     g = res["g"]
-    K, frames = load_rig(reg_dir)
-    uv2w = build_uv_to_world(reg_dir, g)
+    K, frames = load_reconstruction_rig_and_frames(reg_dir)
+    uv2w = build_texture_uv_to_world_interpolator(reg_dir, g)
     zt = args.z_thresh
     out = []
     for ncc, x, y, dx, dy, off, ch in res["pairs"]:
@@ -196,18 +196,18 @@ def confirm(res, reg_dir, args):
         PB = np.asarray(PB).ravel()
         both = a_only = b_only = ncov = 0
         for f in frames:
-            aX, aY, aZ = project_pt(PA, f, K)
-            bX, bY, bZ = project_pt(PB, f, K)
+            aX, aY, aZ = project_world_point_into_source_frame(PA, f, K)
+            bX, bY, bZ = project_world_point_into_source_frame(PB, f, K)
             inb = lambda px, py, z: z > 10 and 12 <= px < K["Wf"] - 12 and 12 <= py < K["Hf"] - 12
             if not (inb(aX, aY, aZ) and inb(bX, bY, bZ)):
                 continue
             sds = max(1, round(K["fxf"] / f["standoff"] / args.src_ppmm))
-            im = load_src(f["path"], sds)
+            im = load_downscaled_source_frame(f["path"], sds)
             if im is None:
                 continue
             pp = K["fxf"] / f["standoff"] / sds
-            zA = matched_z(im, aX / sds, aY / sds, pp, ch)
-            zB = matched_z(im, bX / sds, bY / sds, pp, ch)
+            zA = measure_source_feature_contrast_zscore(im, aX / sds, aY / sds, pp, ch)
+            zB = measure_source_feature_contrast_zscore(im, bX / sds, bY / sds, pp, ch)
             ncov += 1
             if zA > zt and zB > zt:
                 both += 1
@@ -241,7 +241,7 @@ def main():
     ap.add_argument("--k-sigma", type=float, default=3.5)
     ap.add_argument("--min-std", type=float, default=4.0)
     ap.add_argument(
-        "--no-confirm", action="store_true", help="skip the source-frame ground-truth confirmation"
+        "--no-confirm_texture_doublings_from_source_frames", action="store_true", help="skip the source-frame ground-truth confirmation"
     )
     ap.add_argument(
         "--z-thresh",
@@ -254,19 +254,19 @@ def main():
     args = ap.parse_args()
     reg = args.reg_dir.rstrip("/")
     out = args.out or os.path.join(reg, "doublings")
-    res = find(reg, args)
+    res = find_texture_doublings(reg, args)
     print(f"  {len(res['pairs'])} NCC candidate pairs; confirming vs source...", flush=True)
     if args.no_confirm:
-        write(res, out)
+        write_texture_doubling_reports(res, out)
         print(f"DOUBLINGS(NCC only): {len(res['pairs'])}  -> {out}", flush=True)
         return
-    conf = confirm(res, reg, args)
-    write(res, out)
+    conf = confirm_texture_doublings_from_source_frames(res, reg, args)
+    write_texture_doubling_reports(res, out)
     order = {"DOUBLING": 0, "distinct": 1, "weak": 2, "unknown": 3}
     conf.sort(key=lambda c: (order[c[7]], -c[0]))
     ndbl = 0
     for ncc, x, y, dx, dy, off, ch, verdict, both, alone, ncov in conf:
-        u, v = g_uv(res["g"], x, y)
+        u, v = map_gauge_coordinates_to_texture_uv(res["g"], x, y)
         if verdict == "DOUBLING":
             ndbl += 1
         if verdict in ("DOUBLING", "distinct"):
@@ -277,12 +277,12 @@ def main():
             )
     print(
         f"CONFIRMED DOUBLINGS: {ndbl}   (NCC candidates {len(res['pairs'])}, "
-        f"seeds {res['n_seeds']})  -> {out}",
+        f"detect_texture_doubling_candidates {res['n_seeds']})  -> {out}",
         flush=True,
     )
 
 
-def g_uv(g, x, y):
+def map_gauge_coordinates_to_texture_uv(g, x, y):
     u, v = g.px_to_uv(x, y)
     return float(u), float(v)
 

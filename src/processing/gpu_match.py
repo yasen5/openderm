@@ -1,6 +1,6 @@
 """Exact GPU (torch/CUDA) 2-NN SIFT descriptor matching.
 
-Replaces the approximate FLANN kd-tree matcher when CUDA is available: a
+Replaces the approximate FLANN kd-tree matcher when CUDA is gpu_matcher_available: a
 brute-force torch.cdist top-2. This is EXACT nearest-neighbour search (FLANN
 at trees=5/checks=64 is approximate and can miss true neighbours), it is
 deterministic, and a 6000x6000 descriptor pair takes ~5 ms on an RTX 4090
@@ -23,7 +23,7 @@ except Exception:  # torch not installed
     _TORCH = False
 
 
-def available() -> bool:
+def gpu_matcher_available() -> bool:
     return _TORCH and torch.cuda.is_available()
 
 

@@ -13,16 +13,16 @@ from types import SimpleNamespace
 import numpy as np
 
 from .. import registration_features
-from ..registration_features import extract, load_frames, match_pair, set_gpu_matcher
+from ..registration_features import extract_camera_frame_sift_keypoints, load_scan_camera_frames, match_camera_frame_pair_keypoints, configure_gpu_feature_matcher
 from ..registration_geometry import (
     RigModel,
-    find_overlap_pairs,
-    predicted_pair_translation,
-    prefit_rig_model,
+    find_overlapping_frame_pairs,
+    predict_frame_pair_translation,
+    estimate_initial_rig_camera_model,
 )
 
 
-def _prepare_problem(args, mem_cap=None):
+def build_scan_reconstruction_problem(args, mem_cap=None):
     """Load captures, match features, and establish the rig prior."""
     out_dir = args.out or os.path.join(args.capture_dir, "registration3d")
     os.makedirs(out_dir, exist_ok=True)
@@ -43,7 +43,7 @@ def _prepare_problem(args, mem_cap=None):
         col_range = (int(lo), int(hi or lo))
 
     print(f"[1/9] loading frames from {args.capture_dir}")
-    frames = load_frames(args.capture_dir, args.limit_rows, row_range, station_range, col_range)
+    frames = load_scan_camera_frames(args.capture_dir, args.limit_rows, row_range, station_range, col_range)
     if len(frames) < 2:
         print("need >=2 frames; aborting")
         sys.exit(1)
@@ -80,12 +80,12 @@ def _prepare_problem(args, mem_cap=None):
 
     if cached is None:
         print(f"[2/9] extracting CLAHE-SIFT features (downscale={args.downscale})")
-        extract(frames, args.downscale, args.nfeatures)
+        extract_camera_frame_sift_keypoints(frames, args.downscale, args.nfeatures)
         if args.device != "cpu":
-            from processing.gpu_match import GpuMatcher, available as _gm_ok
+            from processing.gpu_match import GpuMatcher, gpu_matcher_available as _gm_ok
 
             if _gm_ok():
-                set_gpu_matcher(GpuMatcher())
+                configure_gpu_feature_matcher(GpuMatcher())
                 print("      descriptor matching: exact 2-NN on cuda (torch)")
         h0, w0 = frames[0].shape
     else:
@@ -98,7 +98,7 @@ def _prepare_problem(args, mem_cap=None):
         print("[3/9] matching consecutive pairs")
         cpairs = []
         for k in range(len(frames) - 1):
-            p = match_pair(frames[k], frames[k + 1], args.ratio, args.min_inliers)
+            p = match_camera_frame_pair_keypoints(frames[k], frames[k + 1], args.ratio, args.min_inliers)
             if p is None:
                 print(f"  ! consecutive pair {k}->{k + 1} FAILED")
                 continue
@@ -117,7 +117,7 @@ def _prepare_problem(args, mem_cap=None):
                 continue
             for f in byrow[r][::2]:
                 g_ = min(byrow[r + 1], key=lambda q: abs(q.g[0] - f.g[0]))
-                p = match_pair(f, g_, args.ratio, args.min_inliers)
+                p = match_camera_frame_pair_keypoints(f, g_, args.ratio, args.min_inliers)
                 if p is not None:
                     xpairs.append(p)
         print(f"      {len(xpairs)} cross-row pairs matched")
@@ -147,7 +147,7 @@ def _prepare_problem(args, mem_cap=None):
         # rough fx init: median consecutive-pair shift per 10mm gantry step at Z~110
         ts = np.array([[p.tx, p.ty] for p in cpairs])
         fx0 = float(np.median(np.linalg.norm(ts, axis=1)) / 10.0 * 110.0)
-        mdl, prefit_rms = prefit_rig_model(frames, cpairs + xpairs, w0, h0, args.downscale, fx0)
+        mdl, prefit_rms = estimate_initial_rig_camera_model(frames, cpairs + xpairs, w0, h0, args.downscale, fx0)
     if args.fx_full:
         mdl.fx = args.fx_full / args.downscale
         print(
@@ -168,7 +168,7 @@ def _prepare_problem(args, mem_cap=None):
             f"[5/9] matching overlapping pairs (overlap>={args.overlap_frac}, "
             f"top-{args.max_partners}/frame)"
         )
-        keep, overlaps = find_overlap_pairs(
+        keep, overlaps = find_overlapping_frame_pairs(
             mdl, frames, R0, C0, args.overlap_frac, args.max_partners
         )
         existing = {(p.i, p.j) for p in cpairs} | {(p.i, p.j) for p in xpairs}
@@ -178,8 +178,8 @@ def _prepare_problem(args, mem_cap=None):
         added = rejected = 0
         t0 = time.time()
         for n_, (i, j) in enumerate(to_match):
-            tpred = predicted_pair_translation(mdl, frames, R0, C0, i, j)
-            p = match_pair(
+            tpred = predict_frame_pair_translation(mdl, frames, R0, C0, i, j)
+            p = match_camera_frame_pair_keypoints(
                 frames[i],
                 frames[j],
                 args.ratio,
@@ -218,7 +218,7 @@ def _prepare_problem(args, mem_cap=None):
 
     if registration_features._GPU_MATCHER is not None:
         registration_features._GPU_MATCHER.clear()  # free descriptor VRAM before render
-        set_gpu_matcher(None)
+        configure_gpu_feature_matcher(None)
     return SimpleNamespace(
         out_dir=out_dir,
         frames=frames,

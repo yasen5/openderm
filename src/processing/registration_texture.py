@@ -11,15 +11,15 @@ from types import SimpleNamespace
 import cv2
 import numpy as np
 
-from .registration_features import _mem_available_bytes
-from .registration_geometry import project
-from .registration_surface import frame_footprint_world
+from .registration_features import _get_available_system_memory_bytes
+from .registration_geometry import project_world_points_into_camera
+from .registration_surface import compute_camera_frame_surface_footprint
 
 
 # ----------------------------------------------------------------------------
 # ortho-texture rendering
 # ----------------------------------------------------------------------------
-def fit_frame_gains(frames, mdl, obs_frame, obs_uv, obs_track, err=None, mode="on"):
+def estimate_camera_frame_texture_gains(frames, mdl, obs_frame, obs_uv, obs_track, err=None, mode="on"):
     """Per-frame BGR gain fitted from BA track colors (photometric seams).
 
     The lamp travels with the camera, so the same skin patch renders up to
@@ -127,13 +127,13 @@ def fit_frame_gains(frames, mdl, obs_frame, obs_uv, obs_track, err=None, mode="o
     return gam.astype(np.float32)
 
 
-def _texture_bounds(frames, R, C, mdl, surf, tp, ppmm):
+def compute_texture_bounds(frames, R, C, mdl, surf, tp, ppmm):
     """Return frame footprints and the landmark-supported texture canvas."""
     foot_uv = {}
     umin = vmin = np.inf
     umax = vmax = -np.inf
     for f in frames:
-        P = frame_footprint_world(f, R, C, mdl, surf)
+        P = compute_camera_frame_surface_footprint(f, R, C, mdl, surf)
         u, v = tp.to_uv(P[:, 0], P[:, 1])
         foot_uv[f.idx] = np.stack([u, v], 1)
         umin, umax = min(umin, u.min()), max(umax, u.max())
@@ -160,7 +160,7 @@ def _texture_bounds(frames, R, C, mdl, surf, tp, ppmm):
     return foot_uv, (umin, vmin, umax, vmax), W, H
 
 
-def _prepare_renderer(
+def prepare_texture_render_state(
     frames,
     R,
     C,
@@ -187,10 +187,14 @@ def _prepare_renderer(
     gpu = None
     gpu_oom = RuntimeError
     if device != "cpu":
-        from processing.render_gpu import GpuFramePipe, GpuOom, gpu_available
+        from processing.render_gpu import (
+            GpuFramePipe,
+            GpuOom,
+            texture_gpu_renderer_available,
+        )
 
         gpu_oom = GpuOom
-        if gpu_available():
+        if texture_gpu_renderer_available():
             gpu = GpuFramePipe(blend_mode)
             if os.environ.get("SKINMAP_NO_VRAM_CANVAS"):
                 print("      render device: cuda (torch), canvases in RAM (SKINMAP_NO_VRAM_CANVAS)")
@@ -210,7 +214,7 @@ def _prepare_renderer(
     # kernel OOM killer takes innocent processes with it, so abort cleanly
     per_texel = 32 if blend_mode == "two-band" else 16
     need = float(H) * W * per_texel
-    avail_ram = _mem_available_bytes()
+    avail_ram = _get_available_system_memory_bytes()
     if need > 0.6 * avail_ram:
         sys.exit(
             f"      ! texture canvases for {W}x{H} need {need / 1e9:.1f} GB "
@@ -310,7 +314,7 @@ def _prepare_renderer(
     )
 
 
-def _frame_geometry(state, frame, upsample=True):
+def compute_camera_frame_surface_projection(state, frame, upsample=True):
     """Project one frame and calculate its geometric blend weights."""
     fp = state.foot_uv[frame.idx]
     umin, vmin, ppmm = state.umin, state.vmin, state.ppmm
@@ -358,7 +362,7 @@ def _frame_geometry(state, frame, upsample=True):
     Xg, Yg = state.tp.to_xy(Uw, Vw)
     Zg = state.surf.height(Xg, Yg)
     P = np.stack([Xg, Yg, Zg], 1)
-    uv, zc = project(
+    uv, zc = project_world_points_into_camera(
         P,
         state.R[frame.idx],
         state.C[frame.idx],
@@ -420,7 +424,7 @@ def _frame_geometry(state, frame, upsample=True):
     return (u0, u1, v0, v1), mapx, mapy, wgt2d, soft2d
 
 
-def _group_ownership(state, frame_group):
+def build_texture_ownership_by_frame_group(state, frame_group):
     """Compute one owning capture group per texture texel."""
     if frame_group is None:
         return None, {}, []
@@ -429,7 +433,7 @@ def _group_ownership(state, frame_group):
     started = time.time()
     gids = sorted(set(frame_group.values()))
     geo_cache = {}
-    geo_bytes, geo_budget = 0, 0.25 * _mem_available_bytes()
+    geo_bytes, geo_budget = 0, 0.25 * _get_available_system_memory_bytes()
     gpu_own = False
     if gpu is not None:
         try:
@@ -440,7 +444,7 @@ def _group_ownership(state, frame_group):
     ordered = sorted(frames, key=lambda frame: frame_group[frame.idx])
     if gpu_own:
         for frame in ordered:
-            result = _frame_geometry(state, frame, upsample=False)
+            result = compute_camera_frame_surface_projection(state, frame, upsample=False)
             if result is None:
                 continue
             if state.gpu_geom is None and geo_bytes < geo_budget:
@@ -455,7 +459,7 @@ def _group_ownership(state, frame_group):
         own_sum = np.zeros((H, W), np.float32)
         current_group = None
         for frame in ordered:
-            result = _frame_geometry(state, frame)
+            result = compute_camera_frame_surface_projection(state, frame)
             if result is None:
                 continue
             (u0, u1, v0, v1), _, _, weight, _ = result
@@ -475,7 +479,7 @@ def _group_ownership(state, frame_group):
     return best_group, geo_cache, gids
 
 
-def _low_frequency_group_gates(
+def compute_low_frequency_group_blend_gates(
     best_group,
     gids,
     group_feather_mm,
@@ -506,12 +510,12 @@ def _low_frequency_group_gates(
     return result
 
 
-def _tick(profile, key, started):
+def log_texture_render_profile_tick(profile, key, started):
     profile[key] = profile.get(key, 0.0) + time.perf_counter() - started
     return time.perf_counter()
 
 
-def _deposit_cpu_frame(
+def accumulate_camera_frame_into_cpu_texture(
     state,
     frame,
     geometry,
@@ -617,7 +621,7 @@ def _deposit_cpu_frame(
     state.w_best[v0:v1, u0:u1][wins] = ownership_weight[wins]
 
 
-def _deposit_frames(
+def accumulate_camera_frames_into_texture(
     state,
     frame_group,
     frame_gain,
@@ -634,10 +638,10 @@ def _deposit_frames(
     for frame in state.frames:
         step_started = time.perf_counter()
         if state.gpu is not None:
-            geometry = geo_cache.pop(frame.idx, None) or _frame_geometry(
+            geometry = geo_cache.pop(frame.idx, None) or compute_camera_frame_surface_projection(
                 state, frame, upsample=False
             )
-            step_started = _tick(profile, "geom", step_started)
+            step_started = log_texture_render_profile_tick(profile, "geom", step_started)
             if geometry is None:
                 continue
             rect, decimated = geometry
@@ -675,22 +679,22 @@ def _deposit_frames(
                     state.gpu_canvas = False
                 tiles = "cpu-fallback"
             if tiles != "cpu-fallback":
-                step_started = _tick(profile, "gpu", step_started)
+                step_started = log_texture_render_profile_tick(profile, "gpu", step_started)
                 if tiles is None:
                     continue
                 if tiles.get("accumulated"):
-                    _tick(profile, "accum", step_started)
-                    _print_render_progress(frame, state.frames, started, profile)
+                    log_texture_render_profile_tick(profile, "accum", step_started)
+                    print_texture_render_progress(frame, state.frames, started, profile)
                     continue
-                _accumulate_gpu_tiles(state, tiles)
-                _tick(profile, "accum", step_started)
-                _print_render_progress(frame, state.frames, started, profile)
+                accumulate_gpu_texture_render_tiles(state, tiles)
+                log_texture_render_profile_tick(profile, "accum", step_started)
+                print_texture_render_progress(frame, state.frames, started, profile)
                 continue
-        geometry = _frame_geometry(state, frame)
-        step_started = _tick(profile, "geom", step_started)
+        geometry = compute_camera_frame_surface_projection(state, frame)
+        step_started = log_texture_render_profile_tick(profile, "geom", step_started)
         if geometry is None:
             continue
-        _deposit_cpu_frame(
+        accumulate_camera_frame_into_cpu_texture(
             state,
             frame,
             geometry,
@@ -702,15 +706,15 @@ def _deposit_frames(
             hf_cross_group,
             hf_coherence_mm,
         )
-        _tick(profile, "cpu", step_started)
-        _print_render_progress(frame, state.frames, started, profile)
+        log_texture_render_profile_tick(profile, "cpu", step_started)
+        print_texture_render_progress(frame, state.frames, started, profile)
     if state.gpu_canvas:
         state.acc, state.wacc, high_gpu, _ = state.gpu.canvases_take()
         if high_gpu is not None:
             state.hf_best = high_gpu
 
 
-def _accumulate_gpu_tiles(state, tiles):
+def accumulate_gpu_texture_render_tiles(state, tiles):
     u0, u1, v0, v1 = tiles["rect"]
     if state.blend_mode == "two-band":
         soft, ownership_weight = tiles["soft"], tiles["wown"]
@@ -724,7 +728,7 @@ def _accumulate_gpu_tiles(state, tiles):
         state.wacc[v0:v1, u0:u1] += tiles["wgt2"]
 
 
-def _print_render_progress(frame, frames, started, profile):
+def print_texture_render_progress(frame, frames, started, profile):
     if frame.idx % 20 == 0 or frame.idx == len(frames) - 1:
         breakdown = " ".join(f"{key}:{value:.0f}s" for key, value in profile.items())
         print(
@@ -733,7 +737,7 @@ def _print_render_progress(frame, frames, started, profile):
         )
 
 
-def _write_texture_outputs(state, out_dir):
+def write_texture_outputs(state, out_dir):
     """Normalize the canvases and write texture, coverage, and index images."""
     texture = state.acc / np.maximum(state.wacc[..., None], 1e-6)
     if state.blend_mode == "two-band":
@@ -785,7 +789,7 @@ def _write_texture_outputs(state, out_dir):
     return texture, state.wacc, state.bounds
 
 
-def render_texture(
+def render_surface_texture(
     frames,
     R,
     C,
@@ -808,8 +812,8 @@ def render_texture(
     frame_gain=None,
 ):
     """Render the registered captures through bounded, independently testable stages."""
-    foot_uv, bounds, width, height = _texture_bounds(frames, R, C, mdl, surf, tp, ppmm)
-    state = _prepare_renderer(
+    foot_uv, bounds, width, height = compute_texture_bounds(frames, R, C, mdl, surf, tp, ppmm)
+    state = prepare_texture_render_state(
         frames,
         R,
         C,
@@ -828,11 +832,11 @@ def render_texture(
         width,
         height,
     )
-    best_group, geometry_cache, group_ids = _group_ownership(state, frame_group)
-    low_frequency_gates = _low_frequency_group_gates(
+    best_group, geometry_cache, group_ids = build_texture_ownership_by_frame_group(state, frame_group)
+    low_frequency_gates = compute_low_frequency_group_blend_gates(
         best_group, group_ids, group_feather_mm, ppmm, width, height
     )
-    _deposit_frames(
+    accumulate_camera_frames_into_texture(
         state,
         frame_group,
         frame_gain,
@@ -843,4 +847,4 @@ def render_texture(
         hf_cross_group,
         hf_coherence_mm,
     )
-    return _write_texture_outputs(state, out_dir)
+    return write_texture_outputs(state, out_dir)

@@ -13,7 +13,7 @@ from .tex_anchor import Gauge, coverage_mask
 IDENT = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 
-def resample_to_common(reg_dir, g: Gauge, umin, vmin, Wc, Hc, ppmm):
+def resample_texture_to_common_canvas(reg_dir, g: Gauge, umin, vmin, Wc, Hc, ppmm):
     """Remap a scan's texture + coverage onto the common (u,v)-mm canvas."""
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
     cov = coverage_mask(reg_dir)
@@ -28,7 +28,7 @@ def resample_to_common(reg_dir, g: Gauge, umin, vmin, Wc, Hc, ppmm):
     return tex_c, (cov_c > 127).astype(np.uint8)
 
 
-def common_canvas(rdA, gA, rdB, gB, ppmm):
+def compute_shared_texture_canvas(rdA, gA, rdB, gB, ppmm):
     umin = max(gA.umin, gB.umin)
     umax = min(gA.umax, gB.umax)
     vmin = max(gA.vmin, gB.vmin)
@@ -37,14 +37,14 @@ def common_canvas(rdA, gA, rdB, gB, ppmm):
         raise SystemExit("ABSTAIN: scans share no (u,v) overlap region.")
     Wc = int(round((umax - umin) * ppmm))
     Hc = int(round((vmax - vmin) * ppmm))
-    texA, covA = resample_to_common(rdA, gA, umin, vmin, Wc, Hc, ppmm)
-    texB, covB = resample_to_common(rdB, gB, umin, vmin, Wc, Hc, ppmm)
+    texA, covA = resample_texture_to_common_canvas(rdA, gA, umin, vmin, Wc, Hc, ppmm)
+    texB, covB = resample_texture_to_common_canvas(rdB, gB, umin, vmin, Wc, Hc, ppmm)
     return dict(
         umin=umin, vmin=vmin, ppmm=ppmm, W=Wc, H=Hc, texA=texA, texB=texB, covA=covA, covB=covB
     )
 
 
-def global_align(texA, texB, covA, covB, ppmm):
+def align_scan_textures_globally(texA, texB, covA, covB, ppmm):
     grayA = cv2.cvtColor(texA, cv2.COLOR_BGR2GRAY)
     grayB = cv2.cvtColor(texB, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
@@ -100,7 +100,7 @@ def global_align(texA, texB, covA, covB, ppmm):
     return T, info
 
 
-def mole_align(molesA, molesB, ppmm, tol_mm=3.0, min_inliers=3, min_sep_mm=8.0):
+def estimate_scan_alignment_from_moles(molesA, molesB, ppmm, tol_mm=3.0, min_inliers=3, min_sep_mm=8.0):
     """Constellation alignment: the moles are their own fiducials (design doc).
 
     A 2-point RANSAC over SIMILARITY transforms: each pair of A-moles and pair
@@ -158,15 +158,15 @@ def mole_align(molesA, molesB, ppmm, tol_mm=3.0, min_inliers=3, min_sep_mm=8.0):
     return best_T, best_in
 
 
-def count_matches(molesA, molesB, T, ppmm, tol_mm):
+def count_transformed_mole_matches(molesA, molesB, T, ppmm, tol_mm):
     """How many independently-detected moles a transform brings into agreement
     (greedy unique). This is the corroboration signal used to pick the alignment
     -- the geometrically-correct transform aligns the most moles, regardless of
     how few SIFT inliers produced it."""
-    return len(match_moles(molesA, molesB, T, ppmm, tol_mm)[0])
+    return len(match_scan_moles_after_alignment(molesA, molesB, T, ppmm, tol_mm)[0])
 
 
-def select_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=3.0):
+def select_best_scan_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=3.0):
     """Choose the B->A transform + confidence (shared by compare_scans and
     new_moles). SIFT and the mole-constellation each propose a candidate; the one
     aligning the most independently-detected moles wins (geometry beats SIFT
@@ -182,14 +182,14 @@ def select_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=
         and abs(ainfo["tx_mm"]) < 80
         and abs(ainfo["ty_mm"]) < 80
     )
-    Tmole, mole_inl = mole_align(molesA, molesB, ppmm, tol_mm=mole_tol_mm, min_inliers=3)
+    Tmole, mole_inl = estimate_scan_alignment_from_moles(molesA, molesB, ppmm, tol_mm=mole_tol_mm, min_inliers=3)
     cands = [("gantry-only", IDENT)]
     if sift_plausible:
         cands.append(("sift", np.array(ainfo["T_B_to_A"])))
     if Tmole is not None:
         cands.append(("mole-constellation", Tmole))
     scored = sorted(
-        ((nm, Tc, count_matches(molesA, molesB, Tc, ppmm, mole_tol_mm)) for nm, Tc in cands),
+        ((nm, Tc, count_transformed_mole_matches(molesA, molesB, Tc, ppmm, mole_tol_mm)) for nm, Tc in cands),
         key=lambda s: -s[2],
     )
     mode, T, n_corrob = scored[0]
@@ -198,8 +198,8 @@ def select_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=
         sift_T is not None
         and Tmole is not None
         and np.hypot(sift_T[0, 2] - Tmole[0, 2], sift_T[1, 2] - Tmole[1, 2]) / ppmm <= 5.0
-        and count_matches(molesA, molesB, sift_T, ppmm, mole_tol_mm) >= 3
-        and count_matches(molesA, molesB, Tmole, ppmm, mole_tol_mm) >= 3
+        and count_transformed_mole_matches(molesA, molesB, sift_T, ppmm, mole_tol_mm) >= 3
+        and count_transformed_mole_matches(molesA, molesB, Tmole, ppmm, mole_tol_mm) >= 3
     )
     sift_overwhelming = (
         sift_plausible and ainfo["inliers"] >= 50 and ainfo["inlier_spread_mm"] >= 100
@@ -231,8 +231,8 @@ def select_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=
         res = np.linalg.norm(dstA - mapped, axis=1) / ppmm
         corr = dict(dst_px=dstA.tolist(), resid_mm=res.tolist())
     elif mode == "mole-constellation" and Tmole is not None:
-        pr = match_moles(molesA, molesB, Tmole, ppmm, mole_tol_mm + 1.0)[0]
-        Bxy = apply_T(Tmole, [[molesB[p["iB"]]["x"], molesB[p["iB"]]["y"]] for p in pr])
+        pr = match_scan_moles_after_alignment(molesA, molesB, Tmole, ppmm, mole_tol_mm + 1.0)[0]
+        Bxy = apply_scan_alignment_transform(Tmole, [[molesB[p["iB"]]["x"], molesB[p["iB"]]["y"]] for p in pr])
         dst = [[molesA[p["iA"]]["x"], molesA[p["iA"]]["y"]] for p in pr]
         res = [float(np.hypot(d[0] - b[0], d[1] - b[1]) / ppmm) for d, b in zip(dst, Bxy)]
         corr = dict(dst_px=dst, resid_mm=res)
@@ -251,19 +251,19 @@ def select_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=
     )
 
 
-def apply_T(T, pts):
+def apply_scan_alignment_transform(T, pts):
     if T is None:
         return np.asarray(pts, float)
     P = np.asarray(pts, float)
     return (P @ np.array(T)[:, :2].T) + np.array(T)[:, 2]
 
 
-def match_moles(molesA, molesB, T, ppmm, prior_mm):
+def match_scan_moles_after_alignment(molesA, molesB, T, ppmm, prior_mm):
     """Match B->A (B mapped into A frame by T). Greedy NN under prior radius."""
     if not molesA or not molesB:
         return [], list(range(len(molesA))), list(range(len(molesB)))
     A = np.array([[m["x"], m["y"]] for m in molesA], float)
-    B = apply_T(T, [[m["x"], m["y"]] for m in molesB])
+    B = apply_scan_alignment_transform(T, [[m["x"], m["y"]] for m in molesB])
     prior_px = prior_mm * ppmm
     pairs, usedA, usedB = [], set(), set()
     cost = []
@@ -283,7 +283,7 @@ def match_moles(molesA, molesB, T, ppmm, prior_mm):
     return pairs, onlyA, onlyB
 
 
-def constellation_check(molesA, molesB, pairs, ppmm, min_inliers=5):
+def validate_mole_constellation_correspondence(molesA, molesB, pairs, ppmm, min_inliers=5):
     """Independent sanity check: do matched moles agree on a rigid map?"""
     if len(pairs) < min_inliers:
         return dict(
