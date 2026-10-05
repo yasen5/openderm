@@ -8,9 +8,34 @@ import math
 import os
 import time
 from dataclasses import MISSING, dataclass, field, fields
+from typing import Any, Protocol, TypedDict, cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
+
+
+FloatArray = NDArray[np.float32]
+
+
+class CaptureMetadata(TypedDict, total=False):
+    """Known fields in a capture sidecar; extra sidecar keys are ignored."""
+
+    image: str
+    station: int
+    row: int
+    col: int
+    phase: str
+    x_mm: float
+    y_mm: float
+    z_mm: float
+    rx_rad: float
+    sensor1_mm: float | None
+    sensor2_mm: float | None
+    sensor1_in_range: bool
+    sensor2_in_range: bool
+    target_mm: float
+    settled: bool
 
 
 # ----------------------------------------------------------------------------
@@ -25,18 +50,18 @@ class Frame:
     phase: str  # contour-scan y sweep phase ('+y'/'-y'); backs have none
     sidecar: str
     image_path: str
-    gauge: np.ndarray  # gantry (x, y, z) mm
+    gauge: NDArray[np.float64]  # gantry (x, y, z) mm
     rx: float  # radians
     standoff: float  # mean of in-range distance sensors, mm
     settled: bool
-    sensor_mm: dict = field(default_factory=dict)  # per-sensor reading or None (OOR)
+    sensor_mm: dict[str, float | None] = field(default_factory=dict)  # None means out of range
     # filled later
-    gray: np.ndarray = field(default=None, repr=False)
-    kp: list = field(default=None, repr=False)
-    des: np.ndarray = field(default=None, repr=False)
-    shape: tuple = None
+    gray: NDArray[np.uint8] | None = field(default=None, repr=False)
+    kp: list[_KPt] | None = field(default=None, repr=False)
+    des: FloatArray | None = field(default=None, repr=False)
+    shape: tuple[int, ...] | None = None
 
-    def __init__(self, *positional_values, **frame_values):
+    def __init__(self, *positional_values: object, **frame_values: object) -> None:
         # ``g`` was the original capture-side field name. Accept it when
         # reading older callers while keeping the stored field descriptive.
         if "g" in frame_values:
@@ -64,7 +89,7 @@ class Frame:
             unexpected_field = next(iter(frame_values))
             raise TypeError(f"Frame got an unexpected keyword argument {unexpected_field!r}")
 
-    def __getattr__(self, field_name):
+    def __getattr__(self, field_name: str) -> Any:
         if field_name == "g":
             return self.gauge
         raise AttributeError(field_name)
@@ -78,7 +103,7 @@ def load_scan_camera_frames(
     col_range: tuple[int, int] | None = None,
 ) -> list[Frame]:
     sidecars = sorted(glob.glob(os.path.join(capture_dir, "*.json")))
-    capture_records = []
+    capture_records: list[tuple[str, str, CaptureMetadata]] = []
     for sidecar_path in sidecars:
         try:
             with open(sidecar_path) as fh:
@@ -91,9 +116,10 @@ def load_scan_camera_frames(
             # them instead of crashing the run.
             print(f"  ! skipping unreadable sidecar {os.path.basename(sidecar_path)} ({caught_exception})")
             continue
-        if not isinstance(frame_metadata, dict):
+        if not isinstance(frame_metadata, dict) or not all(isinstance(key, str) for key in frame_metadata):
             continue
-        image_reference = frame_metadata.get("image")
+        metadata = cast(CaptureMetadata, frame_metadata)
+        image_reference = metadata.get("image")
         if image_reference and not os.path.isabs(image_reference):
             image_path = image_reference if os.path.exists(image_reference) else os.path.join(capture_dir, os.path.basename(image_reference))
         else:
@@ -101,10 +127,10 @@ def load_scan_camera_frames(
         if not image_path or not os.path.exists(image_path):
             print(f"  ! skipping {os.path.basename(sidecar_path)} (image not found: {image_reference})")
             continue
-        capture_records.append((sidecar_path, image_path, frame_metadata))
+        capture_records.append((sidecar_path, image_path, metadata))
     # a station re-captured later (aborted run restarted) supersedes the
     # earlier shot; sidecars are timestamp-sorted so the last one wins
-    by_station: dict = {}
+    by_station: dict[int | str, tuple[str, str, CaptureMetadata]] = {}
     for sidecar_path, image_path, frame_metadata in capture_records:
         station_key = frame_metadata.get("station", os.path.basename(sidecar_path))
         if station_key in by_station:
@@ -112,7 +138,7 @@ def load_scan_camera_frames(
         by_station[station_key] = (sidecar_path, image_path, frame_metadata)
     capture_records = [by_station[item_index] for item_index in sorted(by_station, key=str)]
     capture_records.sort(key=lambda capture_record: capture_record[0])
-    frames = []
+    frames: list[Frame] = []
     for sidecar_path, image_path, frame_metadata in capture_records:
         row_number = int(frame_metadata.get("row", 1))
         if limit_rows and row_number > limit_rows:
@@ -128,7 +154,7 @@ def load_scan_camera_frames(
         sensor1_mm, sensor2_mm = frame_metadata.get("sensor1_mm"), frame_metadata.get("sensor2_mm")
         sensor1_in_range = frame_metadata.get("sensor1_in_range", True)
         sensor2_in_range = frame_metadata.get("sensor2_in_range", True)
-        sensor_readings = [
+        sensor_readings: list[float] = [
             reading
             for reading, in_range in (
                 (sensor1_mm, sensor1_in_range), (sensor2_mm, sensor2_in_range)
@@ -145,8 +171,12 @@ def load_scan_camera_frames(
                 phase=str(frame_metadata.get("phase", "+y")),
                 sidecar=sidecar_path,
                 image_path=image_path,
-                g=np.array([float(frame_metadata["x_mm"]), float(frame_metadata["y_mm"]), float(frame_metadata["z_mm"])]),
-                rx=float(frame_metadata["rx_rad"]),
+                g=np.array([
+                    float(cast(float, frame_metadata.get("x_mm"))),
+                    float(cast(float, frame_metadata.get("y_mm"))),
+                    float(cast(float, frame_metadata.get("z_mm"))),
+                ]),
+                rx=float(cast(float, frame_metadata.get("rx_rad"))),
                 standoff=standoff,
                 settled=bool(frame_metadata.get("settled", True)),
                 sensor_mm={
@@ -173,7 +203,7 @@ def _get_available_system_memory_bytes() -> float:
     return float("inf")
 
 
-def _apply_processing_memory_limit(frac: float = 0.7, budget: int | None = None):
+def _apply_processing_memory_limit(frac: float = 0.7, budget: int | None = None) -> int | None:
     """Cap THIS process's data segment (heap + anonymous mmaps) so a runaway
     allocation dies here with a MemoryError instead of driving the kernel OOM
     killer into other users' processes (a full-res extract_camera_frame_sift_keypoints pool once swapped
@@ -204,11 +234,13 @@ class _KPt:
 
     __slots__ = ("pt",)
 
-    def __init__(self, pt):
+    def __init__(self, pt: tuple[float, float]) -> None:
         self.pt = pt
 
 
-def _extract_camera_frame_sift_keypoints(path: str, downscale: int, nfeatures: int, mem_budget: int | None = None):
+def _extract_camera_frame_sift_keypoints(
+    path: str, downscale: int, nfeatures: int, mem_budget: int | None = None
+) -> tuple[FloatArray, FloatArray | None, tuple[int, ...]]:
     """One frame's CLAHE-SIFT; module-level so a process pool can run it.
     Returns (pts float32 (N,2), des float32 (N,128), shape)."""
     cv2.setNumThreads(1)  # the pool is the parallelism
@@ -229,17 +261,19 @@ def _extract_camera_frame_sift_keypoints(path: str, downscale: int, nfeatures: i
         gauge = cv2.resize(gauge, None, fx=1 / downscale, fy=1 / downscale, interpolation=cv2.INTER_AREA)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
     gauge = clahe.apply(gauge)
-    sift = cv2.SIFT_create(nfeatures=nfeatures, contrastThreshold=0.008, edgeThreshold=20)
-    kp, des = sift.detectAndCompute(gauge, None)
-    pts = np.float32([item_index.pt for item_index in kp])
-    return pts, des, gauge.shape
+    cv_api: Any = cv2
+    sift = cv_api.SIFT_create(nfeatures=nfeatures, contrastThreshold=0.008, edgeThreshold=20)
+    kp, raw_descriptors = sift.detectAndCompute(gauge, None)
+    pts = cast(FloatArray, np.asarray([item_index.pt for item_index in kp], dtype=np.float32))
+    descriptors = cast(FloatArray | None, raw_descriptors)
+    return pts, descriptors, gauge.shape
 
 
 def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfeatures: int) -> None:
     """CLAHE-SIFT for every frame, fanned out over a process pool (identical
     per-frame results to the serial path; SIFT itself is deterministic)."""
     t0 = time.time()
-    results = None
+    results: list[tuple[FloatArray, FloatArray | None, tuple[int, ...]]] | None = None
     if len(frames) > 3:
         try:
             import concurrent.futures as cf
@@ -258,6 +292,8 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
             # A flat bytes-per-pixel estimate can starve workers because SIFT
             # allocates its full Gaussian and DoG pyramids up front.
             im0 = cv2.imread(frames[0].image_path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
+            if im0 is None:
+                raise RuntimeError(f"could not read {frames[0].image_path}")
             px_full = float(im0.shape[0] * im0.shape[1])
             px_ds = px_full / max(1, downscale * downscale)
             per_worker = 0.4e9 + px_full * 8.0 + px_ds * 240.0
@@ -284,13 +320,13 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
             # allocs with GBs "in use"). The pool is the parallelism --
             # worker-internal threads are pure overhead, so pin children to
             # one thread / two arenas via env the spawn re-import reads.
-            one_thread = {
+            one_thread: dict[str, str] = {
                 "OMP_NUM_THREADS": "1",
                 "OPENBLAS_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
                 "MALLOC_ARENA_MAX": "2",
             }
-            saved_env = {item_index: os.environ.get(item_index) for item_index in one_thread}
+            saved_env: dict[str, str | None] = {item_index: os.environ.get(item_index) for item_index in one_thread}
             os.environ.update(one_thread)
             try:
                 with cf.ProcessPoolExecutor(
@@ -320,7 +356,7 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
     for frame, (pts, des, shape) in zip(frames, results):
         frame.gray = None  # unused downstream; skip the RAM
         frame.shape = shape
-        frame.kp = [_KPt(tuple(point)) for point in pts]
+        frame.kp = [_KPt((float(point[0]), float(point[1]))) for point in pts]
         frame.des = des
         if frame.idx % 20 == 0 or frame.idx == len(frames) - 1:
             print(
@@ -339,12 +375,12 @@ class Pair:
     ty: float
     rot_deg: float
     scale: float
-    src: np.ndarray  # inlier pts in frame i (downscaled px)
-    dst: np.ndarray  # inlier pts in frame j
-    src_kp: np.ndarray  # keypoint indices in frame i (for track building)
-    dst_kp: np.ndarray
+    src: FloatArray  # inlier pts in frame i (downscaled px)
+    dst: FloatArray  # inlier pts in frame j
+    src_kp: NDArray[np.int32]  # keypoint indices in frame i (for track building)
+    dst_kp: NDArray[np.int32]
 
-    def __init__(self, *positional_values, **pair_values):
+    def __init__(self, *positional_values: object, **pair_values: object) -> None:
         # Keep the original pair endpoint keywords available to callers.
         for legacy_name, descriptive_name in (("i", "index"), ("j", "neighbor_index")):
             if legacy_name in pair_values:
@@ -366,7 +402,7 @@ class Pair:
             unexpected_field = next(iter(pair_values))
             raise TypeError(f"Pair got an unexpected keyword argument {unexpected_field!r}")
 
-    def __getattr__(self, field_name):
+    def __getattr__(self, field_name: str) -> Any:
         if field_name == "i":
             return self.index
         if field_name == "j":
@@ -374,14 +410,20 @@ class Pair:
         raise AttributeError(field_name)
 
 
-def _create_feature_matching_flann_index():
+def _create_feature_matching_flann_index() -> cv2.FlannBasedMatcher:
     return cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=64))
 
 
-_GPU_MATCHER = None  # set by main() when --device cuda
+class GpuFeatureMatcher(Protocol):
+    def knn2(
+        self, key_q: int, des_q: FloatArray, key_t: int, des_t: FloatArray
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.int64]]: ...
 
 
-def configure_gpu_feature_matcher(mask) -> None:
+_GPU_MATCHER: GpuFeatureMatcher | None = None  # set by main() when --device cuda
+
+
+def configure_gpu_feature_matcher(mask: GpuFeatureMatcher | None) -> None:
     global _GPU_MATCHER
     _GPU_MATCHER = mask
 
@@ -391,17 +433,28 @@ def match_camera_frame_pair_keypoints(
     target_frame: Frame,
     ratio: float,
     min_inliers: int,
-    prior_xy=None,
+    prior_xy: tuple[float, float] | None = None,
     prior_tol: float = 0.0,
 ) -> Pair | None:
-    if source_frame.des is None or target_frame.des is None or len(source_frame.kp) < 2 or len(target_frame.kp) < 2:
+    if (
+        source_frame.des is None
+        or target_frame.des is None
+        or source_frame.kp is None
+        or target_frame.kp is None
+        or len(source_frame.kp) < 2
+        or len(target_frame.kp) < 2
+    ):
         return None
     if _GPU_MATCHER is not None:
         nearest_distances, second_nearest_distances, nearest_neighbor_indices = _GPU_MATCHER.knn2(
             source_frame.idx, source_frame.des, target_frame.idx, target_frame.des
         )
-        source_keypoint_indices = np.where(nearest_distances < ratio * second_nearest_distances)[0].astype(np.int32)
-        target_keypoint_indices = nearest_neighbor_indices[source_keypoint_indices].astype(np.int32)
+        source_keypoint_indices = cast(
+            NDArray[np.int32], np.where(nearest_distances < ratio * second_nearest_distances)[0].astype(np.int32)
+        )
+        target_keypoint_indices = cast(
+            NDArray[np.int32], nearest_neighbor_indices[source_keypoint_indices].astype(np.int32)
+        )
     else:
         neighbor_matches = _create_feature_matching_flann_index().knnMatch(source_frame.des, target_frame.des, k=2)
         good_matches = [
@@ -409,15 +462,21 @@ def match_camera_frame_pair_keypoints(
             for first_match, second_match in neighbor_matches
             if first_match.distance < ratio * second_match.distance
         ]
-        source_keypoint_indices = np.int32([match.queryIdx for match in good_matches])
-        target_keypoint_indices = np.int32([match.trainIdx for match in good_matches])
+        source_keypoint_indices = cast(
+            NDArray[np.int32], np.asarray([match.queryIdx for match in good_matches], dtype=np.int32)
+        )
+        target_keypoint_indices = cast(
+            NDArray[np.int32], np.asarray([match.trainIdx for match in good_matches], dtype=np.int32)
+        )
     if len(source_keypoint_indices) < min_inliers:
         return None
-    source_image_points = np.float32(
-        [source_frame.kp[keypoint_index].pt for keypoint_index in source_keypoint_indices]
+    source_image_points = cast(
+        FloatArray,
+        np.asarray([source_frame.kp[keypoint_index].pt for keypoint_index in source_keypoint_indices], dtype=np.float32),
     )
-    target_image_points = np.float32(
-        [target_frame.kp[keypoint_index].pt for keypoint_index in target_keypoint_indices]
+    target_image_points = cast(
+        FloatArray,
+        np.asarray([target_frame.kp[keypoint_index].pt for keypoint_index in target_keypoint_indices], dtype=np.float32),
     )
     if prior_xy is not None and prior_tol > 0:
         observed_translations = target_image_points - source_image_points
@@ -433,7 +492,8 @@ def match_camera_frame_pair_keypoints(
             target_image_points = target_image_points[within_translation_prior]
             source_keypoint_indices = source_keypoint_indices[within_translation_prior]
             target_keypoint_indices = target_keypoint_indices[within_translation_prior]
-    affine_transform, inlier_mask = cv2.estimateAffinePartial2D(
+    cv_api: Any = cv2
+    affine_transform, inlier_mask = cv_api.estimateAffinePartial2D(
         source_image_points, target_image_points, method=cv2.RANSAC, ransacReprojThreshold=4, maxIters=5000, confidence=0.999
     )
     if affine_transform is None or inlier_mask is None:

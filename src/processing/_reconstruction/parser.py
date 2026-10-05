@@ -36,9 +36,62 @@ Run from an environment installed with the `vision` extra:
 from __future__ import annotations
 
 import argparse
+from typing import Literal, cast
 
 
-def parse_scan_cli_arguments():
+class ScanCliArguments(argparse.Namespace):
+    """Typed values returned by :func:`parse_scan_cli_arguments`."""
+
+    capture_dir: str
+    downscale: int
+    nfeatures: int
+    ratio: float
+    min_inliers: int
+    overlap_frac: float
+    max_partners: int
+    max_corr_per_pair: int
+    rounds: int
+    fx_full: float
+    fit_k1: bool
+    sigma_px: float
+    sigma_t: float
+    sigma_r: float
+    surface_pitch: float
+    surface_smooth: float
+    mesh_pitch: float
+    texture_ppmm: float
+    blend_sharpness: float
+    blend: Literal["soft", "two-band"]
+    focus_weight: float
+    hf_coherence_mm: float
+    mesh_smooth: list[float]
+    max_incidence_deg: float
+    group_feather_mm: float
+    hf_cross_group: bool
+    lf_gain: Literal["on", "field", "off"]
+    deformable_order: Literal[1, 2]
+    limit_rows: int
+    rows: str | None
+    stations: str | None
+    cols: str | None
+    group_by_row: bool
+    group_align: Literal["none", "translation"]
+    deformable: bool
+    deformable_reg: float
+    rig_from: str | None
+    contour: Literal["auto", "on", "off"]
+    contour_rx_thresh_deg: float
+    contour_rms_thresh: float
+    contour_smooth: float
+    reject_pose_mm: float
+    reject_rot_deg: float
+    no_cache: bool
+    group_ba: Literal["group", "global"]
+    device: Literal["auto", "cuda", "cpu"]
+    out: str | None
+
+
+def parse_scan_cli_arguments() -> ScanCliArguments:
     """Parse registration CLI arguments without running the processing pipeline."""
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -326,4 +379,4 @@ def parse_scan_cli_arguments():
         "else CPU. The registration itself is unaffected.",
     )
     ap.add_argument("--out", default=None)
-    return ap.parse_args()
+    return cast(ScanCliArguments, ap.parse_args())

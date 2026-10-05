@@ -2,12 +2,36 @@
 
 from __future__ import annotations
 
+from typing import TypedDict, Union, cast
+
 import cv2
 import numpy as np
+import numpy.typing as npt
 from scipy.ndimage import gaussian_filter, gaussian_laplace, maximum_filter
 
 
-def melanin_flat(texture_bgr, coverage_mask, pixels_per_mm, background_scale_mm=12.0):
+FloatArray = npt.NDArray[Union[np.float32, np.float64]]
+UInt8Array = npt.NDArray[np.uint8]
+
+
+class MoleDetection(TypedDict):
+    """A detected lesion, with its center in image pixels and size in mm."""
+
+    x: int
+    y: int
+    radius_mm: float
+    diam_mm: float
+    area_mm2: float
+    contrast: float
+    response: float
+
+
+def melanin_flat(
+    texture_bgr: UInt8Array,
+    coverage_mask: UInt8Array,
+    pixels_per_mm: float,
+    background_scale_mm: float = 12.0,
+) -> FloatArray:
     """Melanin proxy M=-log(R), high-passed by a >=2x-largest-blob background.
 
     The background is estimated from COVERED skin only (normalized/masked blur),
@@ -24,10 +48,15 @@ def melanin_flat(texture_bgr, coverage_mask, pixels_per_mm, background_scale_mm=
     bg = cv2.resize(bg, (image_width, image_height), interpolation=cv2.INTER_CUBIC)
     out = negative_log_red - bg
     out[coverage_mask == 0] = 0.0
-    return out  # moles -> positive bumps
+    return cast(FloatArray, out)  # moles -> positive bumps
 
 
-def hemoglobin_flat(texture_bgr, coverage_mask, pixels_per_mm, background_scale_mm=12.0):
+def hemoglobin_flat(
+    texture_bgr: UInt8Array,
+    coverage_mask: UInt8Array,
+    pixels_per_mm: float,
+    background_scale_mm: float = 12.0,
+) -> FloatArray:
     """Erythema/hemoglobin proxy He = log(R) - log(G) = log(R/G), high-passed the
     same masked way as melanin_flat. Cherry angiomas (red: high R, low G) are
     POSITIVE bumps; brown moles are not. Being a log-RATIO, a multiplicative
@@ -45,22 +74,22 @@ def hemoglobin_flat(texture_bgr, coverage_mask, pixels_per_mm, background_scale_
     bg = cv2.resize(bg, (image_width, image_height), interpolation=cv2.INTER_CUBIC)
     out = hemoglobin_log_ratio - bg
     out[coverage_mask == 0] = 0.0
-    return out
+    return cast(FloatArray, out)
 
 
 def detect_angiomas(
-    texture_bgr,
-    hemoglobin_channel,
-    melanin_channel,
-    coverage_mask,
-    pixels_per_mm,
-    diam_mm=(0.4, 4.0),
-    min_contrast=0.08,
-    k_sigma=6.0,
-    mel_max=0.07,
-    hue_max=8,
-    sat_min=50,
-):
+    texture_bgr: UInt8Array,
+    hemoglobin_channel: FloatArray,
+    melanin_channel: FloatArray,
+    coverage_mask: UInt8Array,
+    pixels_per_mm: float,
+    diam_mm: tuple[float, float] = (0.4, 4.0),
+    min_contrast: float = 0.08,
+    k_sigma: float = 6.0,
+    mel_max: float = 0.07,
+    hue_max: int = 8,
+    sat_min: int = 50,
+) -> list[MoleDetection]:
     """Detect cherry angiomas: blobs in the hemoglobin channel that are (a) NOT
     dark (melanin bump < mel_max -- the red channel isn't suppressed, so brown
     moles are rejected) and (b) genuinely RED in hue (excludes tan/orange moles
@@ -68,7 +97,7 @@ def detect_angiomas(
     candidates = detect_moles(hemoglobin_channel, coverage_mask, pixels_per_mm, diam_mm, min_contrast, k_sigma)
     smoothed_melanin = gaussian_filter(melanin_channel, 0.35 * pixels_per_mm)
     hsv = cv2.cvtColor(texture_bgr, cv2.COLOR_BGR2HSV)
-    angiomas = []
+    angiomas: list[MoleDetection] = []
     for candidate in candidates:
         pixel_x, pixel_y = candidate["x"], candidate["y"]
         if smoothed_melanin[pixel_y, pixel_x] >= mel_max:  # dark -> brown mole, not angioma
@@ -85,7 +114,12 @@ def detect_angiomas(
     return angiomas
 
 
-def mel_threshold(mel, mask, min_contrast, k_sigma):
+def mel_threshold(
+    mel: FloatArray,
+    mask: UInt8Array,
+    min_contrast: float,
+    k_sigma: float,
+) -> float:
     """Per-scan adaptive melanin-contrast threshold (k robust-sigmas above this
     scan's own skin noise, floored at min_contrast)."""
     covered_melanin_values = mel[mask > 0]
@@ -94,15 +128,15 @@ def mel_threshold(mel, mask, min_contrast, k_sigma):
 
 
 def detect_moles(
-    melanin_image,
-    coverage_mask,
-    pixels_per_mm,
-    diameter_range_mm=(0.4, 5.0),
-    minimum_contrast=0.08,
-    robust_sigma_multiplier=6.0,
-    presmoothing_width_mm=0.35,
-    maximum_candidate_count=400,
-):
+    melanin_image: FloatArray,
+    coverage_mask: UInt8Array,
+    pixels_per_mm: float,
+    diameter_range_mm: tuple[float, float] = (0.4, 5.0),
+    minimum_contrast: float = 0.08,
+    robust_sigma_multiplier: float = 6.0,
+    presmoothing_width_mm: float = 0.35,
+    maximum_candidate_count: int = 400,
+) -> list[MoleDetection]:
     """Multiscale-LoG blob detection on the flattened melanin map.
 
     The LoG locates candidate spots and their scale. The keep decision is a
@@ -131,7 +165,7 @@ def detect_moles(
     # rank by scale-normalized LoG response (peaks at the blob's true scale), so a
     # large mole is accepted before the sub-structure/noise blobs sitting on it.
     ranked_candidates = sorted(zip(maximum_log_response[candidate_pixel_y, candidate_pixel_x], candidate_pixel_x, candidate_pixel_y), reverse=True)
-    detected_moles = []
+    detected_moles: list[MoleDetection] = []
     suppression_mask = np.zeros(coverage_mask.shape, np.uint8)
     for peak_response, pixel_x, pixel_y in ranked_candidates:
         melanin_contrast = float(melanin_image[pixel_y, pixel_x])
@@ -146,7 +180,7 @@ def detect_moles(
         suppression_radius_px = int(max(radius_px * 1.5, 2.5 * pixels_per_mm)) + 1
         cv2.circle(suppression_mask, (int(pixel_x), int(pixel_y)), suppression_radius_px, 1, -1)
         detected_moles.append(
-            dict(
+            MoleDetection(
                 x=int(pixel_x),
                 y=int(pixel_y),
                 radius_mm=float(radius_px / pixels_per_mm),
@@ -161,7 +195,14 @@ def detect_moles(
     return detected_moles
 
 
-def present_in_other(other_melanin_image, feature_pixel_xy, pixels_per_mm, other_threshold, search_radius_mm=2.5, required_fraction=0.5):
+def present_in_other(
+    other_melanin_image: FloatArray,
+    feature_pixel_xy: tuple[float, float],
+    pixels_per_mm: float,
+    other_threshold: float,
+    search_radius_mm: float = 2.5,
+    required_fraction: float = 0.5,
+) -> bool:
     """Is there a (possibly sub-threshold) pigment bump at xy in the other scan?
     Guards new/disappeared against detector misses and cross-scan exposure
     differences: a mole below the other scan's threshold is NOT 'disappeared'."""

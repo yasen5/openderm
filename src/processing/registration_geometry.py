@@ -5,12 +5,47 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
+from collections.abc import Callable
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from .registration_features import Frame
+from .registration_features import Frame, Pair
+
+FloatArray = NDArray[np.float64]
+IntArray = NDArray[np.int32]
+RotationArray = NDArray[np.float64]
+CenterArray = NDArray[np.float64]
+
+
+class RegistrationArgs(Protocol):
+    max_corr_per_pair: int
+    sigma_r: float
+    rounds: int
+    rig_from: str | None
+    sigma_t: float
+    sigma_px: float
+    @property
+    def fx_full(self) -> float | None: ...
+    fit_k1: bool
+    @property
+    def group_align(self) -> str: ...
+
+
+class BundleAdjustmentResult(TypedDict):
+    X: FloatArray
+    track_err: FloatArray
+    obs_frame: IntArray
+    obs_uv: FloatArray
+    obs_track: IntArray
+    err: FloatArray
+    R: RotationArray
+    C: CenterArray
+    rms: float
+    history: list[float]
 
 
 # ----------------------------------------------------------------------------
@@ -23,14 +58,14 @@ class RigModel:
     cx: float
     cy: float
     sign: float  # rx rotation sign about world +x
-    lever: np.ndarray  # camera centre offset from toolhead, rotates with rx (mm)
-    Rm: np.ndarray  # 3x3 camera mount rotation (cam->world at rx=0)
+    lever: FloatArray  # camera centre offset from toolhead, rotates with rx (mm)
+    Rm: RotationArray  # 3x3 camera mount rotation (cam->world at rx=0)
     dz0: float  # standoff sensor -> optical centre depth offset (mm)
     downscale: int = 1
-    base_R: np.ndarray = field(default_factory=lambda: np.eye(3))  # gauge fix
-    base_t: np.ndarray = field(default_factory=lambda: np.zeros(3))
+    base_R: RotationArray = field(default_factory=lambda: np.eye(3))  # gauge fix
+    base_t: CenterArray = field(default_factory=lambda: np.zeros(3))
 
-    def poses(self, frames) -> tuple[np.ndarray, np.ndarray]:
+    def poses(self, frames: list[Frame]) -> tuple[RotationArray, CenterArray]:
         """Nominal (R_cam2world (n,3,3), C (n,3)) for every frame."""
         frame_count = len(frames)
         camera_rotations = np.zeros((frame_count, 3, 3))
@@ -41,11 +76,19 @@ class RigModel:
             camera_rotations[frame.idx] = self.base_R @ Rrx @ self.Rm
         return camera_rotations, camera_centers
 
-    def depth(self, frame) -> float:
+    def depth(self, frame: Frame) -> float:
         return frame.standoff + self.dz0
 
 
-def project_world_points_into_camera(landmark_points, camera_to_world_rotation, camera_centers, focal_length_px, k1, principal_point_x, principal_point_y):
+def project_world_points_into_camera(
+    landmark_points: FloatArray,
+    camera_to_world_rotation: RotationArray,
+    camera_centers: FloatArray,
+    focal_length_px: float,
+    k1: float,
+    principal_point_x: float,
+    principal_point_y: float,
+) -> tuple[FloatArray, FloatArray]:
     """World pts (N,3) -> pixel (N,2) + cam-z (N,). Rcw: cam->world 3x3."""
     camera_points = (landmark_points - camera_centers) @ camera_to_world_rotation  # = Rcw^T (X - C)
     camera_depth = np.maximum(camera_points[:, 2], 1e-6)
@@ -58,7 +101,9 @@ def project_world_points_into_camera(landmark_points, camera_to_world_rotation, 
     return image_points, camera_points[:, 2]
 
 
-def undistort_image_points_to_normalized_camera(uv, fx, k1, cx, cy):
+def undistort_image_points_to_normalized_camera(
+    uv: FloatArray, fx: float, k1: float, cx: float, cy: float
+) -> FloatArray:
     """Pixel (N,2) -> normalised undistorted (N,2)."""
     xn = (uv - [cx, cy]) / fx
     xu = xn.copy()
@@ -68,7 +113,10 @@ def undistort_image_points_to_normalized_camera(uv, fx, k1, cx, cy):
     return xu
 
 
-def estimate_initial_rig_camera_model(frames, consecutive_pairs, image_width, image_height, downscale, initial_focal_length_px) -> tuple[RigModel, float]:
+def estimate_initial_rig_camera_model(
+    frames: list[Frame], consecutive_pairs: list[Pair], image_width: int, image_height: int,
+    downscale: int, initial_focal_length_px: float,
+) -> tuple[RigModel, float]:
     """Fit the mechanical rig model from consecutive-pair affine transforms.
 
     The focal-length estimate here is an initialization for the mechanical fit;
@@ -100,13 +148,13 @@ def estimate_initial_rig_camera_model(frames, consecutive_pairs, image_width, im
         measured_image_positions.append(sample_image_points @ pair_affine[:, :2].T + pair_affine[:, 2])
     measured_image_positions = np.array(measured_image_positions)  # (npair, 5, 2)
 
-    gantry_positions = np.array([frame.g for frame in frames])
+    gantry_positions = np.array([frame.gauge for frame in frames])
     frame_x_rotation_angles = np.array([frame.rx for frame in frames])
     frame_standoff_measurements = np.array([frame.standoff for frame in frames])
-    pair_first_frame_indices = np.array([consecutive_pair.i for consecutive_pair in consecutive_pairs])
-    pair_second_frame_indices = np.array([consecutive_pair.j for consecutive_pair in consecutive_pairs])
+    pair_first_frame_indices = np.array([consecutive_pair.index for consecutive_pair in consecutive_pairs])
+    pair_second_frame_indices = np.array([consecutive_pair.neighbor_index for consecutive_pair in consecutive_pairs])
 
-    def build_initial_camera_mount_rotation(optical_axis_tilt_degrees, camera_roll_degrees):
+    def build_initial_camera_mount_rotation(optical_axis_tilt_degrees: float, camera_roll_degrees: float) -> RotationArray:
         camera_forward_axis = np.array([0, 0, -1.0])
         camera_roll_radians = math.radians(camera_roll_degrees)
         camera_space_points = np.array([math.cos(camera_roll_radians), math.sin(camera_roll_radians), 0.0])
@@ -114,10 +162,12 @@ def estimate_initial_rig_camera_model(frames, consecutive_pairs, image_width, im
         camera_mount_basis = np.stack([camera_space_points, camera_up_axis, camera_forward_axis], axis=1)
         return Rotation.from_rotvec([math.radians(optical_axis_tilt_degrees), 0, 0]).as_matrix() @ camera_mount_basis
 
-    def build_pair_reprojection_residual_function(frame_rotation_sign, initial_mount_rotation):
+    def build_pair_reprojection_residual_function(
+        frame_rotation_sign: float, initial_mount_rotation: RotationArray
+    ) -> Callable[[FloatArray], FloatArray]:
         frame_x_rotations = Rotation.from_rotvec(np.outer(frame_rotation_sign * frame_x_rotation_angles, [1, 0, 0])).as_matrix()
 
-        def compute_reprojection_residuals(parameter_vector):
+        def compute_reprojection_residuals(parameter_vector: FloatArray) -> FloatArray:
             focal_length_px, depth_offset_mm = parameter_vector[0], parameter_vector[1]
             lever = parameter_vector[2:5]
             camera_mount_rotation = initial_mount_rotation @ Rotation.from_rotvec(parameter_vector[5:8]).as_matrix()
@@ -172,6 +222,7 @@ def estimate_initial_rig_camera_model(frames, consecutive_pairs, image_width, im
         )
         if best is None or fit_result.cost < best[0]:
             best = (fit_result.cost, fit_result, frame_rotation_sign, build_initial_camera_mount_rotation(optical_axis_tilt_deg, camera_roll_deg), optical_axis_tilt_deg, camera_roll_deg)
+    assert best is not None, "initial rig fit produced no valid optimizer trials"
     fit_cost, fit_result, frame_rotation_sign, initial_mount_rotation, optical_axis_tilt_deg, camera_roll_deg = best
     parameter_vector = fit_result.x
     camera_mount_rotation = initial_mount_rotation @ Rotation.from_rotvec(parameter_vector[5:8]).as_matrix()
@@ -201,7 +252,10 @@ def estimate_initial_rig_camera_model(frames, consecutive_pairs, image_width, im
 # ----------------------------------------------------------------------------
 # overlap prediction on the (curved) surface
 # ----------------------------------------------------------------------------
-def predict_frame_pair_translation(rig_model, frames, camera_rotations, camera_centers, index, neighbor_index):
+def predict_frame_pair_translation(
+    rig_model: RigModel, frames: list[Frame], camera_rotations: RotationArray,
+    camera_centers: CenterArray, index: int, neighbor_index: int,
+) -> FloatArray:
     """Predicted image translation i->j (mean over sample pts) in ds px."""
     image_width, image_height = rig_model.cx * 2, rig_model.cy * 2
     sample_image_points = np.array(
@@ -232,7 +286,10 @@ def predict_frame_pair_translation(rig_model, frames, camera_rotations, camera_c
     return (projected_image_points - sample_image_points).mean(0)
 
 
-def find_overlapping_frame_pairs(rig_model, frames, camera_rotations, camera_centers, overlap_frac, max_partners):
+def find_overlapping_frame_pairs(
+    rig_model: RigModel, frames: list[Frame], camera_rotations: RotationArray,
+    camera_centers: CenterArray, overlap_frac: float, max_partners: int,
+) -> tuple[set[tuple[int, int]], dict[tuple[int, int], float]]:
     """Predict pairwise overlap by projecting footprints onto the mean plane."""
     frame_count = len(frames)
     image_width, image_height = rig_model.cx * 2, rig_model.cy * 2
@@ -280,13 +337,19 @@ def find_overlapping_frame_pairs(rig_model, frames, camera_rotations, camera_cen
 # ----------------------------------------------------------------------------
 # tracks (union-find over matched keypoints)
 # ----------------------------------------------------------------------------
-def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
+def build_3d_feature_tracks(
+    frames: list[Frame], pairs: list[Pair], max_corr_per_pair: int
+) -> tuple[IntArray, FloatArray, IntArray, int]:
     t0 = time.time()
-    nkp = [len(frame.kp) for frame in frames]
+    nkp: list[int] = []
+    for frame in frames:
+        if frame.kp is None:
+            raise ValueError(f"Frame {frame.idx} has no extracted keypoints")
+        nkp.append(len(frame.kp))
     off = np.concatenate([[0], np.cumsum(nkp)])
     parent = np.arange(off[-1], dtype=np.int64)
 
-    def find(parent_node_index):
+    def find(parent_node_index: int) -> int:
         root_node_index = parent_node_index
         while parent[root_node_index] != root_node_index:
             root_node_index = parent[root_node_index]
@@ -301,8 +364,8 @@ def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
         for source_keypoint_index, destination_keypoint_index in zip(
             point.src_kp[selected_correspondence_indices], point.dst_kp[selected_correspondence_indices]
         ):
-            source_root = find(off[point.i] + source_keypoint_index)
-            destination_root = find(off[point.j] + destination_keypoint_index)
+            source_root = find(off[point.index] + source_keypoint_index)
+            destination_root = find(off[point.neighbor_index] + destination_keypoint_index)
             if source_root != destination_root:
                 parent[destination_root] = source_root
 
@@ -310,7 +373,7 @@ def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
     groups = {}
     used = set()
     for point in pairs:
-        for arr, fi in ((point.src_kp, point.i), (point.dst_kp, point.j)):
+        for arr, fi in ((point.src_kp, point.index), (point.dst_kp, point.neighbor_index)):
             for first_value in arr:
                 used.add(off[fi] + first_value)
     for node in used:
@@ -332,7 +395,9 @@ def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
         for n_, fi in zip(nodes, frs):
             kpidx = int(n_ - off[fi])
             obs_frame.append(fi)
-            obs_uv.append(frames[fi].kp[kpidx].pt)
+            keypoints = frames[fi].kp
+            assert keypoints is not None
+            obs_uv.append(keypoints[kpidx].pt)
             obs_track.append(tid)
         tid += 1
     print(
@@ -350,7 +415,10 @@ def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
 # ----------------------------------------------------------------------------
 # bundle adjustment: alternating intersection / resection
 # ----------------------------------------------------------------------------
-def triangulate_3d_feature_tracks(obs_frame, obs_uv, obs_track, ntracks, camera_rotations, camera_centers, rig_model):
+def triangulate_3d_feature_tracks(
+    obs_frame: IntArray, obs_uv: FloatArray, obs_track: IntArray, ntracks: int,
+    camera_rotations: RotationArray, camera_centers: CenterArray, rig_model: RigModel,
+) -> FloatArray:
     xu = undistort_image_points_to_normalized_camera(obs_uv, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy)
     d_cam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
     d_w = np.einsum("nij,nj->ni", camera_rotations[obs_frame], d_cam)
@@ -368,10 +436,19 @@ def triangulate_3d_feature_tracks(obs_frame, obs_uv, obs_track, ntracks, camera_
     # NumPy 2.x interprets a 2-D right-hand side as a stack of matrices,
     # which broadcasts ``(tracks, 3)`` into ``(tracks, tracks, 3)`` here.
     # Make the per-track vector dimension explicit across NumPy versions.
-    return np.linalg.solve(triangulation_normal_matrices, triangulation_right_hand_sides[..., None])[..., 0]
+    return cast(
+        FloatArray,
+        np.linalg.solve(
+            triangulation_normal_matrices, triangulation_right_hand_sides[..., None]
+        )[..., 0],
+    )
 
 
-def compute_feature_track_reprojection_errors(landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model):
+def compute_feature_track_reprojection_errors(
+    landmark_points: FloatArray, obs_frame: IntArray, obs_uv: FloatArray,
+    obs_track: IntArray, camera_rotations: RotationArray,
+    camera_centers: CenterArray, rig_model: RigModel,
+) -> tuple[FloatArray, FloatArray]:
     observed_landmark_points = landmark_points[obs_track]
     observed_camera_centers = camera_centers[obs_frame]
     camera_space_points = np.einsum(
@@ -389,8 +466,11 @@ def compute_feature_track_reprojection_errors(landmark_points, obs_frame, obs_uv
 
 
 def refine_all_camera_poses_from_tracks(
-    frames, landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, R0, C0, rig_model, sigma_px, sigma_t, sigma_r
-):
+    frames: list[Frame], landmark_points: FloatArray, obs_frame: IntArray,
+    obs_uv: FloatArray, obs_track: IntArray, camera_rotations: RotationArray,
+    camera_centers: CenterArray, R0: RotationArray, C0: CenterArray,
+    rig_model: RigModel, sigma_px: float, sigma_t: float, sigma_r: float,
+) -> None:
     order = np.argsort(obs_frame, kind="stable")
     of, ou, ot = obs_frame[order], obs_uv[order], obs_track[order]
     bounds = np.searchsorted(of, np.arange(len(frames) + 1))
@@ -408,7 +488,7 @@ def refine_all_camera_poses_from_tracks(
         d0[:3] = camera_centers[index] - C0[index]
         d0[3:] = Rotation.from_matrix(R0[index].T @ camera_rotations[index]).as_rotvec()
 
-        def residuals(pose_delta):
+        def residuals(pose_delta: FloatArray) -> FloatArray:
             camera_to_world_rotation = R0[index] @ Rotation.from_rotvec(pose_delta[3:]).as_matrix()
             camera_center = C0[index] + pose_delta[:3]
             projected_image_points, camera_depths = project_world_points_into_camera(
@@ -432,7 +512,12 @@ def refine_all_camera_poses_from_tracks(
         print(f"        ({n_small} frames with <20 obs kept at prior pose)")
 
 
-def optimize_camera_intrinsics_from_tracks(landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model, nsub=80000, fit_k1=False):
+def optimize_camera_intrinsics_from_tracks(
+    landmark_points: FloatArray, obs_frame: IntArray, obs_uv: FloatArray,
+    obs_track: IntArray, camera_rotations: RotationArray,
+    camera_centers: CenterArray, rig_model: RigModel, nsub: int = 80000,
+    fit_k1: bool = False,
+) -> None:
     """Closed-form refit of fx (and optionally k1): uv-c = [xn, xn*r2]@[fx, fx*k1].
 
     k1 fitting is off by default: Canon applies lens corrections to JPGs, and
@@ -459,10 +544,12 @@ def optimize_camera_intrinsics_from_tracks(landmark_points, obs_frame, obs_uv, o
     else:
         intrinsic_design_matrix = normalized_image_points.ravel()[:, None]
     centered_image_coordinates = (observed_image_points - [rig_model.cx, rig_model.cy]).ravel()
+    intrinsic_coefficients: FloatArray = np.zeros(2 if fit_k1 else 1)
     for iteration_index in range(3):  # MAD-robust outlier trimming
-        intrinsic_coefficients, residual_sums, matrix_rank, singular_values = np.linalg.lstsq(
+        solved_intrinsic_coefficients, residual_sums, matrix_rank, singular_values = np.linalg.lstsq(
             intrinsic_design_matrix, centered_image_coordinates, rcond=None
         )
+        intrinsic_coefficients = cast(FloatArray, solved_intrinsic_coefficients)
         intrinsic_fit_residuals = intrinsic_design_matrix @ intrinsic_coefficients - centered_image_coordinates
         residual_median = np.median(intrinsic_fit_residuals)
         robust_residual_scale = 1.4826 * np.median(np.abs(intrinsic_fit_residuals - residual_median)) + 1e-9
@@ -478,7 +565,7 @@ def optimize_camera_intrinsics_from_tracks(landmark_points, obs_frame, obs_uv, o
             rig_model.k1 = float(np.clip(float(intrinsic_coefficients[1]) / focal_length_px, -0.15, 0.15))
 
 
-def _project_matrix_to_rotation(matrix):
+def _project_matrix_to_rotation(matrix: FloatArray) -> RotationArray:
     left_singular_vectors, singular_values, right_singular_vectors = np.linalg.svd(matrix)
     rotation_correction = np.diag(
         [1, 1, np.linalg.det(left_singular_vectors @ right_singular_vectors)]
@@ -486,7 +573,10 @@ def _project_matrix_to_rotation(matrix):
     return left_singular_vectors @ rotation_correction @ right_singular_vectors
 
 
-def refit_rig_model_from_camera_poses(frames, camera_rotations, camera_centers, rig_model):
+def refit_rig_model_from_camera_poses(
+    frames: list[Frame], camera_rotations: RotationArray,
+    camera_centers: CenterArray, rig_model: RigModel,
+) -> tuple[RotationArray, CenterArray]:
     """Re-anchor the rig model on the current BA poses.
 
     The pre-fit (consecutive-pair affines only) carries systematic bias; once
@@ -498,13 +588,14 @@ def refit_rig_model_from_camera_poses(frames, camera_rotations, camera_centers, 
     frame_x_rotations = np.stack(
         [Rotation.from_rotvec([rig_model.sign * frame.rx, 0, 0]).as_matrix() for frame in frames]
     )
-    gantry_positions = np.array([frame.g for frame in frames])
+    gantry_positions = np.array([frame.gauge for frame in frames])
     base_rotation = np.eye(3)
     base_translation = np.zeros(3)
     lever = rig_model.lever.copy()
+    mount_rotation: RotationArray = rig_model.Rm.copy()
     for iteration_index in range(4):
         # Solve the lever arm given the current base rotation and translation.
-        lever_design_matrix = np.eins("ij,njk->nik", base_rotation, frame_x_rotations).reshape(-1, 3)
+        lever_design_matrix = np.einsum("ij,njk->nik", base_rotation, frame_x_rotations).reshape(-1, 3)
         lever_targets = (
             camera_centers - base_translation - gantry_positions @ base_rotation.T
         ).ravel()
@@ -536,7 +627,11 @@ def refit_rig_model_from_camera_poses(frames, camera_rotations, camera_centers, 
     return rig_model.poses(frames)
 
 
-def classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs, sigma_t=1.5, sigma_r_deg=3.0):
+def classify_frames_by_capture_direction(
+    frames: list[Frame], camera_rotations: RotationArray, camera_centers: CenterArray,
+    R0: RotationArray, C0: CenterArray, Zs: FloatArray,
+    sigma_t: float = 1.5, sigma_r_deg: float = 3.0,
+) -> None:
     """Re-split each pose deviation along the view-preserving null direction.
 
     With an ~8deg FOV, a sideways camera slide t and a counter-rotation
@@ -567,7 +662,10 @@ def classify_frames_by_capture_direction(frames, camera_rotations, camera_center
         camera_rotations[index] = R0[index] @ Rotation.from_rotvec(rv).as_matrix()
 
 
-def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, C0, args):
+def bundle_adjust_camera_poses_and_feature_tracks(
+    frames: list[Frame], pairs: list[Pair], rig_model: RigModel,
+    R0: RotationArray, C0: CenterArray, args: RegistrationArgs,
+) -> BundleAdjustmentResult:
     obs_frame, obs_uv, obs_track, ntracks = build_3d_feature_tracks(frames, pairs, args.max_corr_per_pair)
     camera_rotations, camera_centers = R0.copy(), C0.copy()
     if ntracks == 0:
@@ -576,7 +674,7 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, 
         # anchors every group anyway; cross-group alignment is regularised so
         # a track-less group simply gets t~0
         print("      ! 0 tracks -- keeping proprioception-prior poses")
-        return dict(
+        return BundleAdjustmentResult(
             X=np.zeros((0, 3)),
             track_err=np.zeros(0),
             obs_frame=np.zeros(0, np.int32),
@@ -736,7 +834,7 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, 
         f"      final: {len(landmark_points)} landmarks, {len(obs_uv)} obs, rms {rms:.2f}px "
         f"(median {np.median(err):.2f}px)"
     )
-    return dict(
+    return BundleAdjustmentResult(
         X=landmark_points,
         track_err=track_err,
         obs_frame=obs_frame,
@@ -750,7 +848,11 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, 
     )
 
 
-def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, C0, args, group_of):
+def bundle_adjust_grouped_camera_poses_and_feature_tracks(
+    frames: list[Frame], pairs: list[Pair], rig_model: RigModel,
+    R0: RotationArray, C0: CenterArray, args: RegistrationArgs,
+    group_of: dict[int, int],
+) -> BundleAdjustmentResult:
     """Breathing-robust registration. The skin deforms between scan passes, so a
     single rigid bundle can't explain frames captured minutes apart -- it puts
     cross-pass features at compromise 3D positions, which then ghost in the
@@ -766,7 +868,7 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_mod
     intra = {gauge: [] for gauge in gids}
     cross = []
     for point in pairs:
-        ga, gb = group_of[point.i], group_of[point.j]
+        ga, gb = group_of[point.index], group_of[point.neighbor_index]
         if ga == gb:
             intra[ga].append(point)
         else:
@@ -779,7 +881,7 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_mod
     grp_of_track = []  # group id per global track
     tbase = 0
 
-    def key(fi, pt):
+    def key(fi: int, pt: FloatArray) -> tuple[int, float, float]:
         return (int(fi), round(float(pt[0]), 2), round(float(pt[1]), 2))
 
     for gauge in gids:
@@ -802,16 +904,16 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_mod
         tbase += len(bundle_adjustment_result["X"])
 
     Xg = np.concatenate(Xparts) if Xparts else np.zeros((0, 3))
-    grp_of_track = np.array(grp_of_track)
+    grp_of_track = np.asarray(grp_of_track, dtype=np.int64)
 
     # cross-group landmark correspondences (dedup by track pair)
-    corr = {}
+    corr: set[tuple[int, int]] = set()
     for point in cross:
         for first_value, second_value in zip(point.src_kp, point.dst_kp):
-            ta = pt2track.get(key(point.i, frames[point.i].kp[first_value].pt))
-            tb = pt2track.get(key(point.j, frames[point.j].kp[second_value].pt))
+            ta = pt2track.get(key(point.index, frames[point.index].kp[int(first_value)].pt))
+            tb = pt2track.get(key(point.neighbor_index, frames[point.neighbor_index].kp[int(second_value)].pt))
             if ta is not None and tb is not None and grp_of_track[ta] != grp_of_track[tb]:
-                corr[(ta, tb)] = True
+                corr.add((ta, tb))
 
     gidx = {gauge: item_index for item_index, gauge in enumerate(gids)}
     t_solved = np.zeros((len(gids), 3))
@@ -863,7 +965,7 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_mod
         f"      grouped final: {len(gids)} groups, {len(Xg)} landmarks, "
         f"{len(obs_uv)} obs, rms {rms:.2f}px (median {np.median(err):.2f}px)"
     )
-    return dict(
+    return BundleAdjustmentResult(
         X=Xg,
         track_err=track_err,
         obs_frame=obs_frame,

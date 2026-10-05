@@ -3,19 +3,97 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping, Sequence
+from typing import Any, Literal, TypedDict, cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 from .tex_anchor import Gauge, coverage_mask
 
 
 IDENT = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
+FloatArray = NDArray[np.float64]
+ImageArray = NDArray[np.uint8]
+Mole = Mapping[str, float]
 
-def resample_texture_to_common_canvas(reg_dir, texture_gauge, umin, vmin, Wc, Hc, pixels_per_mm):
+
+class SharedCanvas(TypedDict):
+    umin: float
+    vmin: float
+    ppmm: float
+    W: int
+    H: int
+    texA: ImageArray
+    texB: ImageArray
+    covA: ImageArray
+    covB: ImageArray
+
+
+class AlignmentInfo(TypedDict):
+    kpA: int
+    kpB: int
+    matches: int
+    inliers: int
+    median_resid_mm: float | None
+    T_B_to_A: list[list[float]] | None
+    scale: float | None
+    rotation_deg: float | None
+    tx_mm: float | None
+    ty_mm: float | None
+    inlier_spread_mm: float | None
+    inlier_dst_A_px: list[list[float]] | None
+    inlier_src_B_px: list[list[float]] | None
+    inlier_resid_mm: list[float] | None
+
+
+class MolePair(TypedDict):
+    iA: int
+    iB: int
+    resid_mm: float
+
+
+class Correspondence(TypedDict):
+    dst_px: list[list[float]]
+    resid_mm: list[float]
+
+
+class AlignmentSelection(TypedDict):
+    T: FloatArray | None
+    mode: str
+    confidence: Literal["high", "medium", "low"]
+    n_corrob: int
+    methods_agree: bool
+    sift_overwhelming: bool
+    Tmole: FloatArray | None
+    mole_inl: int
+    sift_plausible: bool
+    corr: Correspondence | None
+    scored: list[tuple[str, int]]
+
+
+class ConstellationValidation(TypedDict):
+    status: Literal["uninformative", "ok"]
+    n: int
+    note: str | None
+    median_resid_mm: float | None
+
+
+def resample_texture_to_common_canvas(
+    reg_dir: str,
+    texture_gauge: Gauge,
+    umin: float,
+    vmin: float,
+    Wc: int,
+    Hc: int,
+    pixels_per_mm: float,
+) -> tuple[ImageArray, ImageArray]:
     """Remap a scan's texture + coverage onto the common (u,v)-mm canvas."""
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
+    if tex is None:
+        raise ValueError(f"Could not read texture image in {reg_dir}")
     cov = coverage_mask(reg_dir)
     # common pixel (I,J) -> (u,v)mm -> source pixel (i,j)
     Jc, Ic = np.mgrid[0:Hc, 0:Wc].astype(np.float32)
@@ -25,10 +103,22 @@ def resample_texture_to_common_canvas(reg_dir, texture_gauge, umin, vmin, Wc, Hc
     sy = ((texture_v - texture_gauge.vmin) * texture_gauge.ppmm - 0.5).astype(np.float32)
     tex_c = cv2.remap(tex, sx, sy, cv2.INTER_CUBIC, borderValue=(40, 40, 40))
     cov_c = cv2.remap(cov, sx, sy, cv2.INTER_NEAREST, borderValue=0)
-    return tex_c, (cov_c > 127).astype(np.uint8)
+    return cast(ImageArray, tex_c), cast(ImageArray, (cov_c > 127).astype(np.uint8))
 
 
-def compute_shared_texture_canvas(rdA, gA, rdB, gB, pixels_per_mm):
+def _estimate_affine_partial_2d(
+    source: FloatArray,
+    destination: FloatArray,
+    **kwargs: Any,
+) -> tuple[FloatArray | None, NDArray[np.generic] | None]:
+    """Call OpenCV's dynamically exposed estimator with a stable local type."""
+    result = getattr(cv2, "estimateAffinePartial2D")(source, destination, **kwargs)
+    return cast(tuple[FloatArray | None, NDArray[np.generic] | None], result)
+
+
+def compute_shared_texture_canvas(
+    rdA: str, gA: Gauge, rdB: str, gB: Gauge, pixels_per_mm: float
+) -> SharedCanvas:
     umin = max(gA.umin, gB.umin)
     umax = min(gA.umax, gB.umax)
     vmin = max(gA.vmin, gB.vmin)
@@ -39,20 +129,31 @@ def compute_shared_texture_canvas(rdA, gA, rdB, gB, pixels_per_mm):
     Hc = int(round((vmax - vmin) * pixels_per_mm))
     texA, covA = resample_texture_to_common_canvas(rdA, gA, umin, vmin, Wc, Hc, pixels_per_mm)
     texB, covB = resample_texture_to_common_canvas(rdB, gB, umin, vmin, Wc, Hc, pixels_per_mm)
-    return dict(
+    return SharedCanvas(
         umin=umin, vmin=vmin, ppmm=pixels_per_mm, W=Wc, H=Hc, texA=texA, texB=texB, covA=covA, covB=covB
     )
 
 
-def align_scan_textures_globally(texA, texB, covA, covB, pixels_per_mm):
+def align_scan_textures_globally(
+    texA: ImageArray,
+    texB: ImageArray,
+    covA: ImageArray,
+    covB: ImageArray,
+    pixels_per_mm: float,
+) -> tuple[FloatArray | None, AlignmentInfo]:
     grayA = cv2.cvtColor(texA, cv2.COLOR_BGR2GRAY)
     grayB = cv2.cvtColor(texB, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
     grayA, grayB = clahe.apply(grayA), clahe.apply(grayB)
-    sift = cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.008, edgeThreshold=20)
+    sift = getattr(cv2, "SIFT_create")(nfeatures=8000, contrastThreshold=0.008, edgeThreshold=20)
     keypoints_a, descriptors_a = sift.detectAndCompute(grayA, covA * 255)
     keypoints_b, descriptors_b = sift.detectAndCompute(grayB, covB * 255)
-    info = dict(kpA=len(keypoints_a), kpB=len(keypoints_b), matches=0, inliers=0, median_resid_mm=None, T_B_to_A=None)
+    info = AlignmentInfo(
+        kpA=len(keypoints_a), kpB=len(keypoints_b), matches=0, inliers=0,
+        median_resid_mm=None, T_B_to_A=None, scale=None, rotation_deg=None, tx_mm=None,
+        ty_mm=None, inlier_spread_mm=None, inlier_dst_A_px=None, inlier_src_B_px=None,
+        inlier_resid_mm=None,
+    )
     if descriptors_a is None or descriptors_b is None or len(keypoints_a) < 8 or len(keypoints_b) < 8:
         return None, info
     flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=64))
@@ -65,18 +166,18 @@ def align_scan_textures_globally(texA, texB, covA, covB, pixels_per_mm):
     info["matches"] = len(good_matches)
     if len(good_matches) < 6:
         return None, info
-    points_b = np.float32(
-        [keypoints_b[match.queryIdx].pt for match in good_matches]
-    )
-    points_a = np.float32(
-        [keypoints_a[match.trainIdx].pt for match in good_matches]
-    )
-    transform_matrix, inlier_mask = cv2.estimateAffinePartial2D(
+    points_b = np.asarray([keypoints_b[match.queryIdx].pt for match in good_matches], dtype=np.float64)
+    points_a = np.asarray([keypoints_a[match.trainIdx].pt for match in good_matches], dtype=np.float64)
+    transform_matrix, inlier_mask = _estimate_affine_partial_2d(
         points_b, points_a, method=cv2.RANSAC, ransacReprojThreshold=4.0, maxIters=5000, confidence=0.999
     )
     if transform_matrix is None:
         return None, info
-    inlier_mask = inlier_mask.ravel().astype(bool)
+    inlier_mask = (
+        inlier_mask.ravel().astype(bool)
+        if inlier_mask is not None
+        else np.zeros(len(points_a), dtype=bool)
+    )
     mapped_points = (points_b[inlier_mask] @ transform_matrix[:, :2].T) + transform_matrix[:, 2]
     residuals_mm = np.linalg.norm(mapped_points - points_a[inlier_mask], axis=1) / pixels_per_mm
     scale = float(np.hypot(transform_matrix[0, 0], transform_matrix[0, 1]))
@@ -107,10 +208,17 @@ def align_scan_textures_globally(texA, texB, covA, covB, pixels_per_mm):
         inlier_src_B_px=points_b[inlier_mask].tolist(),
         inlier_resid_mm=residuals_mm.tolist(),
     )
-    return transform_matrix, info
+    return cast(FloatArray, transform_matrix), info
 
 
-def estimate_scan_alignment_from_moles(molesA, molesB, pixels_per_mm, tol_mm=3.0, min_inliers=3, min_sep_mm=8.0):
+def estimate_scan_alignment_from_moles(
+    molesA: Sequence[Mole],
+    molesB: Sequence[Mole],
+    pixels_per_mm: float,
+    tol_mm: float = 3.0,
+    min_inliers: int = 3,
+    min_sep_mm: float = 8.0,
+) -> tuple[FloatArray | None, int]:
     """Constellation alignment: the moles are their own fiducials (design doc).
 
     A 2-point RANSAC over SIMILARITY transforms: each pair of A-moles and pair
@@ -136,8 +244,9 @@ def estimate_scan_alignment_from_moles(molesA, molesB, pixels_per_mm, tol_mm=3.0
                 for j2 in range(len(points_b)):
                     if j1 == j2 or abs(np.linalg.norm(points_b[j1] - points_b[j2]) - dA) > tol:
                         continue  # edge length must match (~scale 1)
-                    transform_matrix = cv2.estimateAffinePartial2D(
-                        np.float32([points_b[j1], points_b[j2]]), np.float32([points_a[i1], points_a[i2]])
+                    transform_matrix = _estimate_affine_partial_2d(
+                        np.asarray([points_b[j1], points_b[j2]], dtype=np.float64),
+                        np.asarray([points_a[i1], points_a[i2]], dtype=np.float64),
                     )[0]
                     if transform_matrix is None:
                         continue
@@ -162,13 +271,21 @@ def estimate_scan_alignment_from_moles(molesA, molesB, pixels_per_mm, tol_mm=3.0
             pb.append(points_b[neighbor_index])
             pa.append(points_a[bi[neighbor_index]])
     if len(pa) >= 2:
-        T2 = cv2.estimateAffinePartial2D(np.float32(pb), np.float32(pa))[0]
+        T2 = _estimate_affine_partial_2d(
+            np.asarray(pb, dtype=np.float64), np.asarray(pa, dtype=np.float64)
+        )[0]
         if T2 is not None:
             return T2, best_in
     return best_T, best_in
 
 
-def count_transformed_mole_matches(molesA, molesB, transform_matrix, pixels_per_mm, tol_mm):
+def count_transformed_mole_matches(
+    molesA: Sequence[Mole],
+    molesB: Sequence[Mole],
+    transform_matrix: FloatArray | None,
+    pixels_per_mm: float,
+    tol_mm: float,
+) -> int:
     """How many independently-detected moles a transform brings into agreement
     (greedy unique). This is the corroboration signal used to pick the alignment
     -- the geometrically-correct transform aligns the most moles, regardless of
@@ -176,7 +293,14 @@ def count_transformed_mole_matches(molesA, molesB, transform_matrix, pixels_per_
     return len(match_scan_moles_after_alignment(molesA, molesB, transform_matrix, pixels_per_mm, tol_mm)[0])
 
 
-def select_best_scan_alignment(ainfo, molesA, molesB, pixels_per_mm, max_resid_mm=3.0, mole_tol_mm=3.0):
+def select_best_scan_alignment(
+    ainfo: AlignmentInfo,
+    molesA: Sequence[Mole],
+    molesB: Sequence[Mole],
+    pixels_per_mm: float,
+    max_resid_mm: float = 3.0,
+    mole_tol_mm: float = 3.0,
+) -> AlignmentSelection:
     """Choose the B->A transform + confidence (shared by compare_scans and
     new_moles). SIFT and the mole-constellation each propose a candidate; the one
     aligning the most independently-detected moles wins (geometry beats SIFT
@@ -186,10 +310,15 @@ def select_best_scan_alignment(ainfo, molesA, molesB, pixels_per_mm, max_resid_m
         ainfo["T_B_to_A"] is not None
         and ainfo["median_resid_mm"] is not None
         and ainfo["median_resid_mm"] <= max_resid_mm
+        and ainfo["scale"] is not None
         and 0.95 < ainfo["scale"] < 1.05
+        and ainfo["rotation_deg"] is not None
         and abs(ainfo["rotation_deg"]) < 10
+        and ainfo["inlier_spread_mm"] is not None
         and ainfo["inlier_spread_mm"] >= 40
+        and ainfo["tx_mm"] is not None
         and abs(ainfo["tx_mm"]) < 80
+        and ainfo["ty_mm"] is not None
         and abs(ainfo["ty_mm"]) < 80
     )
     Tmole, mole_inl = estimate_scan_alignment_from_moles(molesA, molesB, pixels_per_mm, tol_mm=mole_tol_mm, min_inliers=3)
@@ -212,7 +341,10 @@ def select_best_scan_alignment(ainfo, molesA, molesB, pixels_per_mm, max_resid_m
         and count_transformed_mole_matches(molesA, molesB, Tmole, pixels_per_mm, mole_tol_mm) >= 3
     )
     sift_overwhelming = (
-        sift_plausible and ainfo["inliers"] >= 50 and ainfo["inlier_spread_mm"] >= 100
+        sift_plausible
+        and ainfo["inliers"] >= 50
+        and ainfo["inlier_spread_mm"] is not None
+        and ainfo["inlier_spread_mm"] >= 100
     )
     # gantry-only winning with high corroboration means the subject did NOT
     # reposition (identity IS the right transform) -- that is the best case, not
@@ -233,20 +365,25 @@ def select_best_scan_alignment(ainfo, molesA, molesB, pixels_per_mm, max_resid_m
     # chosen T is ~identity and the SIFT residual is ~0, giving a correctly TIGHT
     # registration uncertainty (not the flat 1mm "we don't know" fallback).
     corr = None
-    if sift_plausible and "inlier_src_B_px" in ainfo and transform_matrix is not None:
+    if (
+        sift_plausible
+        and ainfo["inlier_src_B_px"] is not None
+        and ainfo["inlier_dst_A_px"] is not None
+        and transform_matrix is not None
+    ):
         srcB = np.asarray(ainfo["inlier_src_B_px"], float)
         dstA = np.asarray(ainfo["inlier_dst_A_px"], float)
         Tn = np.asarray(transform_matrix)
         mapped = (srcB @ Tn[:, :2].T) + Tn[:, 2]
         res = np.linalg.norm(dstA - mapped, axis=1) / pixels_per_mm
-        corr = dict(dst_px=dstA.tolist(), resid_mm=res.tolist())
+        corr = Correspondence(dst_px=dstA.tolist(), resid_mm=res.tolist())
     elif mode == "mole-constellation" and Tmole is not None:
         pr = match_scan_moles_after_alignment(molesA, molesB, Tmole, pixels_per_mm, mole_tol_mm + 1.0)[0]
         Bxy = apply_scan_alignment_transform(Tmole, [[molesB[point["iB"]]["x"], molesB[point["iB"]]["y"]] for point in pr])
         dst = [[molesA[point["iA"]]["x"], molesA[point["iA"]]["y"]] for point in pr]
         res = [float(np.hypot(distance[0] - second_value[0], distance[1] - second_value[1]) / pixels_per_mm) for distance, second_value in zip(dst, Bxy)]
-        corr = dict(dst_px=dst, resid_mm=res)
-    return dict(
+        corr = Correspondence(dst_px=dst, resid_mm=res)
+    return AlignmentSelection(
         T=transform_matrix,
         mode=mode,
         confidence=confidence,
@@ -261,14 +398,22 @@ def select_best_scan_alignment(ainfo, molesA, molesB, pixels_per_mm, max_resid_m
     )
 
 
-def apply_scan_alignment_transform(transform_matrix, pts):
+def apply_scan_alignment_transform(
+    transform_matrix: FloatArray | None, pts: Sequence[Sequence[float]] | NDArray[np.generic]
+) -> FloatArray:
     if transform_matrix is None:
         return np.asarray(pts, float)
     points = np.asarray(pts, float)
     return (points @ np.array(transform_matrix)[:, :2].T) + np.array(transform_matrix)[:, 2]
 
 
-def match_scan_moles_after_alignment(molesA, molesB, transform_matrix, pixels_per_mm, prior_mm):
+def match_scan_moles_after_alignment(
+    molesA: Sequence[Mole],
+    molesB: Sequence[Mole],
+    transform_matrix: FloatArray | None,
+    pixels_per_mm: float,
+    prior_mm: float,
+) -> tuple[list[MolePair], list[int], list[int]]:
     """Match B->A (B mapped into A frame by T). Greedy NN under prior radius."""
     if not molesA or not molesB:
         return [], list(range(len(molesA))), list(range(len(molesB)))
@@ -293,24 +438,36 @@ def match_scan_moles_after_alignment(molesA, molesB, transform_matrix, pixels_pe
     return pairs, onlyA, onlyB
 
 
-def validate_mole_constellation_correspondence(molesA, molesB, pairs, pixels_per_mm, min_inliers=5):
+def validate_mole_constellation_correspondence(
+    molesA: Sequence[Mole],
+    molesB: Sequence[Mole],
+    pairs: Sequence[MolePair],
+    pixels_per_mm: float,
+    min_inliers: int = 5,
+) -> ConstellationValidation:
     """Independent sanity check: do matched moles agree on a rigid map?"""
     if len(pairs) < min_inliers:
-        return dict(
+        return ConstellationValidation(
             status="uninformative",
             n=len(pairs),
             note="too few matched moles for a discriminative constellation",
+            median_resid_mm=None,
         )
     points_a = np.array([[molesA[point["iA"]]["x"], molesA[point["iA"]]["y"]] for point in pairs], float)
     points_b = np.array([[molesB[point["iB"]]["x"], molesB[point["iB"]]["y"]] for point in pairs], float)
     if np.linalg.matrix_rank(points_a - points_a.mean(0)) < 2:
-        return dict(status="uninformative", n=len(pairs), note="collinear moles")
-    T2, inl = cv2.estimateAffinePartial2D(points_b, points_a, method=cv2.RANSAC, ransacReprojThreshold=3.0 * pixels_per_mm)
+        return ConstellationValidation(
+            status="uninformative", n=len(pairs), note="collinear moles", median_resid_mm=None
+        )
+    T2, inl = _estimate_affine_partial_2d(
+        points_b, points_a, method=cv2.RANSAC, ransacReprojThreshold=3.0 * pixels_per_mm
+    )
     inl = inl.ravel().astype(bool) if inl is not None else np.zeros(len(points_a), bool)
     mapped = (points_b @ T2[:, :2].T) + T2[:, 2] if T2 is not None else points_b
     resid = np.linalg.norm(mapped - points_a, axis=1) / pixels_per_mm
-    return dict(
+    return ConstellationValidation(
         status="ok",
         n=int(inl.sum()),
+        note=None,
         median_resid_mm=float(np.median(resid[inl])) if inl.any() else None,
     )

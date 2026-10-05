@@ -5,9 +5,15 @@ from __future__ import annotations
 import json
 import math
 import os
+from typing import Protocol, TypedDict
 
 import numpy as np
+from numpy.typing import NDArray
 
+from ..registration_features import Frame, Pair
+from ..registration_geometry import BundleAdjustmentResult, CenterArray, FloatArray, RigModel, RotationArray
+from ..registration_surface import Surface, TexParam
+from .parser import ScanCliArguments
 from ..registration_export import (
     RECOMMENDATIONS,
     export_surface_landmarks_ply,
@@ -17,14 +23,132 @@ from ..registration_export import (
 )
 
 
-def export_scan_reconstruction_artifacts(args, problem, solution):
+class ReconstructionProblemForExport(Protocol):
+    out_dir: str
+    frames: list[Frame]
+    pairs: list[Pair]
+    rig_model: RigModel
+    prefit_rms: float
+
+
+class ReconstructionSolutionForExport(Protocol):
+    bundle_adjustment_result: BundleAdjustmentResult
+    R: RotationArray
+    C: CenterArray
+    X: FloatArray
+    dt: FloatArray
+    dr: FloatArray
+    med_err: FloatArray
+    surf: Surface
+    surf_rms: float
+    texture_parameters: TexParam
+    tex: NDArray[np.uint8]
+    wacc: NDArray[np.float32] | None
+    tex_bounds: tuple[float, float, float, float]
+    pos: NDArray[np.float32]
+    nrm: NDArray[np.float32]
+    uvn: NDArray[np.float32]
+    faces: NDArray[np.int64]
+    msg_settle: str
+    dzfit: float
+    so_rms: float
+
+
+class ViewerStats(TypedDict):
+    capture: str
+    n_frames: int
+    n_landmarks: int
+    rms_px: str
+    rms_mm: str
+    px_per_mm: str
+    area_cm2: str
+
+
+class GantryPlacement(TypedDict):
+    x: float
+    y: float
+    z: float
+    rx_deg: float
+    standoff_mm: float
+    settled: bool
+
+
+class FramePlacement(TypedDict):
+    idx: int
+    station: int
+    row: int
+    col: int
+    image: str
+    C_mm: list[float]
+    R_cam2world: list[list[float]]
+    gantry: GantryPlacement
+    prior_dev_mm: float
+    prior_dev_deg: float
+    median_reproj_px: float | None
+
+
+class RigPlacement(TypedDict):
+    fx_ds_px: float
+    fx_fullres_px: float
+    k1: float
+    cx: float
+    cy: float
+    rx_sign: float
+    lever_mm: list[float]
+    Rm: list[list[float]]
+    dz0_mm: float
+    base_R: list[list[float]]
+    base_t: list[float]
+
+
+class BundleAdjustmentPlacement(TypedDict):
+    rms_px: float
+    rms_mm: float
+    history: list[float]
+    n_landmarks: int
+    n_obs: int
+
+
+class SurfacePlacement(TypedDict):
+    pitch_mm: float
+    smooth: float
+    landmark_rms_mm: float
+
+
+class TexturePlacement(TypedDict):
+    umin_mm: float
+    vmin_mm: float
+    umax_mm: float
+    vmax_mm: float
+    ppmm: float
+    W: int
+    H: int
+    arclen_gy_mm: list[float]
+    arclen_s_mm: list[float]
+
+
+class PlacementsDocument(TypedDict):
+    capture_dir: str
+    downscale: int
+    rig_model: RigPlacement
+    ba: BundleAdjustmentPlacement
+    surface: SurfacePlacement
+    texture: TexturePlacement
+    frames: list[FramePlacement]
+
+
+def export_scan_reconstruction_artifacts(
+    args: ScanCliArguments,
+    problem: ReconstructionProblemForExport,
+    solution: ReconstructionSolutionForExport,
+) -> None:
     """Write meshes, diagnostics, placements, and the human-readable report."""
     out_dir = problem.out_dir
     frames = problem.frames
     pairs = problem.pairs
-    rig_model = problem.mdl
+    rig_model = problem.rig_model
     prefit_rms = problem.prefit_rms
-    bundle_adjustment_result = solution.ba
+    bundle_adjustment_result = solution.bundle_adjustment_result
     camera_rotations = solution.R
     camera_centers = solution.C
     landmark_points = solution.X
@@ -33,7 +157,7 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
     med_err = solution.med_err
     surf = solution.surf
     surf_rms = solution.surf_rms
-    texture_parameters = solution.tp
+    texture_parameters = solution.texture_parameters
     tex = solution.tex
     wacc = solution.wacc
     tex_bounds = solution.tex_bounds
@@ -50,8 +174,12 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
     render_reconstruction_overview_png(out_dir, frames, camera_rotations, camera_centers, rig_model, surf, landmark_points)
 
     rms_mm = bundle_adjustment_result["rms"] / (rig_model.fx / np.mean([rig_model.depth(frame) for frame in frames]))
-    area_cm2 = (wacc > 0).sum() / (args.texture_ppmm**2) / 100.0
-    stats = dict(
+    area_cm2 = (
+        0.0
+        if wacc is None
+        else float((wacc > 0).sum()) / (args.texture_ppmm**2) / 100.0
+    )
+    stats: ViewerStats = ViewerStats(
         capture=os.path.basename(os.path.normpath(args.capture_dir)),
         n_frames=len(frames),
         n_landmarks=int(len(landmark_points)),
@@ -62,10 +190,10 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
     )
     export_surface_viewer_html(out_dir, frames, camera_rotations, camera_centers, rig_model, pos, uvn, faces, landmark_points, bundle_adjustment_result["track_err"], stats)
 
-    placements = dict(
+    placements: PlacementsDocument = PlacementsDocument(
         capture_dir=args.capture_dir,
         downscale=args.downscale,
-        rig_model=dict(
+        rig_model=RigPlacement(
             fx_ds_px=rig_model.fx,
             fx_fullres_px=rig_model.fx * args.downscale,
             k1=rig_model.k1,
@@ -78,14 +206,14 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
             base_R=rig_model.base_R.tolist(),
             base_t=rig_model.base_t.tolist(),
         ),
-        ba=dict(
+        ba=BundleAdjustmentPlacement(
             rms_px=bundle_adjustment_result["rms"],
-            rms_mm=rms_mm,
+            rms_mm=float(rms_mm),
             history=bundle_adjustment_result["history"],
             n_landmarks=int(len(landmark_points)),
             n_obs=int(len(bundle_adjustment_result["obs_uv"])),
         ),
-        surface=dict(
+        surface=SurfacePlacement(
             pitch_mm=args.surface_pitch, smooth=args.surface_smooth, landmark_rms_mm=surf_rms
         ),
         # Texture canvas gauge -- serialized so cross-scan tools can place two
@@ -94,7 +222,7 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
         # surface grid). The texture image is LINEAR in (u_mm, v_arclen_mm) at
         # ppmm, so pixel (i,j) <-> (umin+i/ppmm, vmin+j/ppmm). arclen_* maps
         # gantry-y -> arc-length-v for mapping texels back to 3D/gantry.
-        texture=dict(
+        texture=TexturePlacement(
             umin_mm=float(tex_bounds[0]),
             vmin_mm=float(tex_bounds[1]),
             umax_mm=float(tex_bounds[2]),
@@ -106,7 +234,7 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
             arclen_s_mm=texture_parameters.s.tolist(),
         ),
         frames=[
-            dict(
+            FramePlacement(
                 idx=frame.idx,
                 station=frame.station,
                 row=frame.row,
@@ -114,10 +242,10 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
                 image=os.path.basename(frame.image_path),
                 C_mm=camera_centers[frame.idx].tolist(),
                 R_cam2world=camera_rotations[frame.idx].tolist(),
-                gantry=dict(
-                    x=frame.g[0],
-                    y=frame.g[1],
-                    z=frame.g[2],
+                gantry=GantryPlacement(
+                    x=float(frame.gauge[0]),
+                    y=float(frame.gauge[1]),
+                    z=float(frame.gauge[2]),
                     rx_deg=math.degrees(frame.rx),
                     standoff_mm=frame.standoff,
                     settled=frame.settled,

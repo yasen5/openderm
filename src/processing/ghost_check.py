@@ -24,13 +24,19 @@ Install OpenDerm with the `vision` extra, then run:
 """
 
 from __future__ import annotations
-import argparse, json, os
+import argparse
+import json
+import os
+import time
+from typing import Any, Literal, Optional, TypedDict, cast
+
 import numpy as np
 import cv2
+from numpy.typing import NDArray
 from scipy.ndimage import gaussian_laplace, maximum_filter
 from scipy.interpolate import LinearNDInterpolator
 
-from processing.tex_anchor import load_gauge, coverage_mask, _parse_obj_v_vt
+from processing.tex_anchor import Gauge, load_gauge, coverage_mask, _parse_obj_v_vt
 from processing.lesions import (
     detect_angiomas,
     detect_moles,
@@ -38,13 +44,117 @@ from processing.lesions import (
     mel_threshold,
     melanin_flat,
 )
+
+Image = NDArray[Any]
+Mask = NDArray[Any]
+FloatArray = NDArray[np.float64]
+Channel = Literal["mel", "hem"]
+Blob = tuple[int, int, float, float]
+SourceBlob = tuple[int, int, float]
+
+
+class CameraIntrinsics(TypedDict):
+    fxf: float
+    k1: float
+    cxf: float
+    cyf: float
+    Wf: float
+    Hf: float
+
+
+class SourceFrame(TypedDict):
+    idx: int
+    station: int
+    row: int
+    path: str
+    R: FloatArray
+    C: FloatArray
+    standoff: float
+
+
+class CandidateSeed(TypedDict):
+    x: int
+    y: int
+    r: float
+    channel: Channel
+
+
+class Candidate(CandidateSeed):
+    u: float
+    v: float
+    P: FloatArray
+
+
+class PerFrameRecord(TypedDict):
+    idx: int
+    station: int
+    sds: int
+    crop: list[int]
+    sblobs: list[SourceBlob]
+    ppmm_s: float
+    assign: list[int]
+    preds: list[list[float]]
+
+
+class GhostRecord(TypedDict):
+    id: int
+    channel: Channel
+    tex_px: list[int]
+    n_comp_blobs: int
+    source_count: int
+    n_phantom: int
+    ghost_excess: int
+    n_cover: int
+    cblobs: list[Blob]
+    per_frame: list[PerFrameRecord]
+
+
+class AnalysisResult(TypedDict):
+    tex: Image
+    g: Gauge
+    records: list[GhostRecord]
+    total_ghosts: int
+    phantoms: int
+    n_candidates: int
+    K: CameraIntrinsics
+    _paths: list[tuple[int, str]]
+
+
+class GhostReport(TypedDict):
+    reg_dir: str
+    total_ghosts: int
+    phantoms: int
+    n_candidates: int
+    ghosts: list[dict[str, Any]]
+
+
+class Arguments(argparse.Namespace):
+    reg_dir: str = ""
+    out: Optional[str] = None
+    window_mm: float = 8.0
+    merge_mm: float = 8.0
+    match_mm: float = 2.0
+    suppress_mm: float = 0.8
+    k_sigma: float = 4.0
+    max_frames: int = 6
+    src_ppmm: float = 20.0
+    src_pad_mm: float = 16.0
+    global_ds: int = 3
+
+
 from processing.register_scan_3d import project_world_points_into_camera
 
 
 # --------------------------------------------------------------------------- #
 def detect_local_lesion_candidate_peaks(
-    chan, pixels_per_mm, mask=None, diam_mm=(0.3, 4.0), k_sigma=4.0, min_contrast=0.05, suppress_mm=0.8
-):
+    chan: Image,
+    pixels_per_mm: float,
+    mask: Mask | None = None,
+    diam_mm: tuple[float, float] = (0.3, 4.0),
+    k_sigma: float = 4.0,
+    min_contrast: float = 0.05,
+    suppress_mm: float = 0.8,
+) -> list[Blob]:
     """Positive-bump detector (multiscale LoG) with a SMALL NMS radius so two
     features ~1-2mm apart stay separate. Returns [(x, y, r_mm, val)]."""
     if mask is None:
@@ -59,7 +169,8 @@ def detect_local_lesion_candidate_peaks(
     win = int(sig_lo * 2) | 1
     loc = (peak == maximum_filter(peak, size=max(3, win))) & (mask > 0) & (peak > 0)
     ys, xs = np.where(loc)
-    out, taken = [], np.zeros(chan.shape, np.uint8)
+    out: list[Blob] = []
+    taken: Mask = np.zeros(chan.shape, np.uint8)
     sup_px = int(max(suppress_mm * pixels_per_mm, 1))
     for val, world_x, world_y in sorted(zip(peak[ys, xs], xs, ys), reverse=True):
         if float(chan[world_y, world_x]) < thr or taken[world_y, world_x]:
@@ -72,7 +183,9 @@ def detect_local_lesion_candidate_peaks(
     return out
 
 
-def detect_source_frame_lesions(bgr, pixels_per_mm, channel, mask=None):
+def detect_source_frame_lesions(
+    bgr: Image, pixels_per_mm: float, channel: Channel, mask: Mask | None = None
+) -> list[SourceBlob]:
     """Real lesion detections (calibrated + red-hue gate for angiomas), the SAME
     definition of 'a feature' used everywhere. Returns [(x, y, r_mm)]."""
     if mask is None:
@@ -86,7 +199,7 @@ def detect_source_frame_lesions(bgr, pixels_per_mm, channel, mask=None):
     return [(frame["x"], frame["y"], frame["radius_mm"]) for frame in feats]
 
 
-def build_texture_uv_to_world_interpolator(reg_dir, gauge):
+def build_texture_uv_to_world_interpolator(reg_dir: str, gauge: Gauge) -> Any:
     """Interpolator (u_mm, v_mm) -> world (x,y,z) from the exported mesh UVs."""
     texture_v_values, VT = _parse_obj_v_vt(os.path.join(reg_dir, "surface_mesh.obj"))
     texture_u = gauge.umin + VT[:, 0] * (gauge.umax - gauge.umin)  # invert build_surface_mesh's VT
@@ -94,19 +207,23 @@ def build_texture_uv_to_world_interpolator(reg_dir, gauge):
     return LinearNDInterpolator(np.column_stack([texture_u, texture_v]), texture_v_values)
 
 
-def load_reconstruction_rig_and_frames(reg_dir):
-    pl = json.load(open(os.path.join(reg_dir, "placements3d.json")))
+def load_reconstruction_rig_and_frames(
+    reg_dir: str,
+) -> tuple[CameraIntrinsics, list[SourceFrame]]:
+    with open(os.path.join(reg_dir, "placements3d.json")) as placements_file:
+        pl = cast(dict[str, Any], json.load(placements_file))
     camera_rotation, ds = pl["rig_model"], pl["downscale"]
-    camera_intrinsics = dict(
+    camera_intrinsics = CameraIntrinsics(
         fxf=float(camera_rotation["fx_fullres_px"]),
         k1=float(camera_rotation["k1"]),
         cxf=float(camera_rotation["cx"]) * ds,
         cyf=float(camera_rotation["cy"]) * ds,
+        Wf=float(camera_rotation["cx"]) * ds * 2,
+        Hf=float(camera_rotation["cy"]) * ds * 2,
     )
-    camera_intrinsics["Wf"], camera_intrinsics["Hf"] = camera_intrinsics["cxf"] * 2, camera_intrinsics["cyf"] * 2
     cap = pl.get("capture_dir") or os.path.dirname(reg_dir.rstrip("/"))
     frames = [
-        dict(
+        SourceFrame(
             idx=frame["idx"],
             station=frame["station"],
             row=frame["row"],
@@ -120,15 +237,17 @@ def load_reconstruction_rig_and_frames(reg_dir):
     return camera_intrinsics, frames
 
 
-def project_world_point_into_source_frame(points, frame, camera_intrinsics):
+def project_world_point_into_source_frame(
+    points: FloatArray, frame: SourceFrame, camera_intrinsics: CameraIntrinsics
+) -> tuple[float, float, float]:
     uv, world_z = project_world_points_into_camera(np.atleast_2d(points), frame["R"], frame["C"], camera_intrinsics["fxf"], camera_intrinsics["k1"], camera_intrinsics["cxf"], camera_intrinsics["cyf"])
     return float(uv[0][0]), float(uv[0][1]), float(world_z[0])
 
 
-_IMG: dict = {}
+_IMG: dict[tuple[str, int], Image | None] = {}
 
 
-def load_downscaled_source_frame(path, ds):
+def load_downscaled_source_frame(path: str, ds: int) -> Image | None:
     key = (path, ds)
     if key not in _IMG:
         im = cv2.imread(path)
@@ -139,18 +258,18 @@ def load_downscaled_source_frame(path, ds):
 
 
 # --------------------------------------------------------------------------- #
-def analyze_reconstruction_ghosts(reg_dir, args):
-    import time
-
+def analyze_reconstruction_ghosts(reg_dir: str, args: Arguments) -> AnalysisResult:
     t0 = time.time()
 
-    def log(descriptive_mask):
+    def log(descriptive_mask: str) -> None:
         print(f"  [{time.time() - t0:5.1f}s] {descriptive_mask}", flush=True)
 
     gauge = load_gauge(reg_dir)
     pixels_per_mm = gauge.ppmm
-    tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
-    cov = coverage_mask(reg_dir)
+    tex = cast(Optional[Image], cv2.imread(os.path.join(reg_dir, "texture.jpg")))
+    if tex is None:
+        raise FileNotFoundError(os.path.join(reg_dir, "texture.jpg"))
+    cov = cast(Mask, coverage_mask(reg_dir))
     camera_intrinsics, frames = load_reconstruction_rig_and_frames(reg_dir)
     log(f"loaded texture {tex.shape[1]}x{tex.shape[0]} @ {pixels_per_mm:.0f}px/mm")
     uv2w = build_texture_uv_to_world_interpolator(reg_dir, gauge)
@@ -160,31 +279,40 @@ def analyze_reconstruction_ghosts(reg_dir, args):
     # blob geometry is redone per-crop at full res). Full-res multiscale LoG over
     # the whole 48Mpx map is what made this slow.
     gds = args.global_ds
-    tg = cv2.resize(tex, None, fx=1 / gds, fy=1 / gds, interpolation=cv2.INTER_AREA)
-    cg = cv2.resize(cov, (tg.shape[1], tg.shape[0]), interpolation=cv2.INTER_NEAREST)
-    dm_g = cv2.erode(
-        cg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * pixels_per_mm / gds) | 1,) * 2)
+    tg = cast(NDArray[np.uint8], cv2.resize(tex, None, fx=1 / gds, fy=1 / gds, interpolation=cv2.INTER_AREA))
+    cg = cast(NDArray[np.uint8], cv2.resize(cov, (tg.shape[1], tg.shape[0]), interpolation=cv2.INTER_NEAREST))
+    dm_g = cast(
+        NDArray[np.uint8],
+        cv2.erode(
+            cg, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * pixels_per_mm / gds) | 1,) * 2)
+        ),
     )
     ppg = pixels_per_mm / gds
     mel_g = melanin_flat(tg, cg, ppg)
     hem_g = hemoglobin_flat(tg, cg, ppg)
-    cands = [
-        dict(x=descriptive_mask["x"] * gds, y=descriptive_mask["y"] * gds, r=descriptive_mask["radius_mm"], channel="mel")
+    cands: list[CandidateSeed] = [
+        CandidateSeed(x=descriptive_mask["x"] * gds, y=descriptive_mask["y"] * gds, r=descriptive_mask["radius_mm"], channel="mel")
         for descriptive_mask in detect_moles(mel_g, dm_g, ppg)
     ] + [
-        dict(x=angioma_detection["x"] * gds, y=angioma_detection["y"] * gds, r=angioma_detection["radius_mm"], channel="hem")
+        CandidateSeed(x=angioma_detection["x"] * gds, y=angioma_detection["y"] * gds, r=angioma_detection["radius_mm"], channel="hem")
         for angioma_detection in detect_angiomas(tg, hem_g, mel_g, dm_g, ppg)
     ]
     cands.sort(key=lambda candidate: candidate["channel"] != "hem")  # prefer red on overlap
-    kept = []
+    kept: list[Candidate] = []
     for candidate in cands:
         if all((candidate["x"] - item_index["x"]) ** 2 + (candidate["y"] - item_index["y"]) ** 2 > (2.5 * pixels_per_mm) ** 2 for item_index in kept):
             u_mm, v_mm = gauge.px_to_uv(candidate["x"], candidate["y"])
             points = uv2w(float(u_mm), float(v_mm))
             if points is None or np.any(np.isnan(points)):
                 continue
-            candidate["u"], candidate["v"], candidate["P"] = float(u_mm), float(v_mm), np.asarray(points).ravel()
-            kept.append(candidate)
+            kept.append(
+                Candidate(
+                    **candidate,
+                    u=float(u_mm),
+                    v=float(v_mm),
+                    P=np.asarray(points).ravel(),
+                )
+            )
     log(f"{len(kept)} candidate features ({sum(candidate['channel'] == 'hem' for candidate in kept)} real red)")
 
     # group candidates that sit within merge_mm on the surface -- only a group of
@@ -192,7 +320,7 @@ def analyze_reconstruction_ghosts(reg_dir, args):
     candidate_count = len(kept)
     parent = list(range(candidate_count))
 
-    def find(candidate_index):
+    def find(candidate_index: int) -> int:
         while parent[candidate_index] != candidate_index:
             parent[candidate_index] = parent[parent[candidate_index]]
             candidate_index = parent[candidate_index]
@@ -205,18 +333,20 @@ def analyze_reconstruction_ghosts(reg_dir, args):
                 and np.linalg.norm(kept[index]["P"] - kept[neighbor_index]["P"]) < args.merge_mm
             ):
                 parent[find(index)] = find(neighbor_index)
-    groups = {}
+    groups: dict[int, list[int]] = {}
     for index in range(candidate_count):
         groups.setdefault(find(index), []).append(index)
 
-    records, total_ghosts, phantoms = [], 0, 0
+    records: list[GhostRecord] = []
+    total_ghosts = 0
+    phantoms = 0
     for gi, mem in enumerate(groups.values()):
         ms = [kept[index] for index in mem]
         ch = ms[0]["channel"]
         cworld = [descriptive_mask["P"] for descriptive_mask in ms]
-        cblobs = [(descriptive_mask["x"], descriptive_mask["y"], descriptive_mask["r"], 0.0) for descriptive_mask in ms]
+        cblobs = [(int(item["x"]), int(item["y"]), item["r"], 0.0) for item in ms]
         cx, cy = int(np.mean([descriptive_mask["x"] for descriptive_mask in ms])), int(np.mean([descriptive_mask["y"] for descriptive_mask in ms]))
-        rec = dict(
+        rec = GhostRecord(
             id=gi,
             channel=ch,
             tex_px=[cx, cy],
@@ -233,19 +363,19 @@ def analyze_reconstruction_ghosts(reg_dir, args):
             continue
 
         Pc = np.mean(cworld, axis=0)
-        cover = []
+        cover_candidates: list[tuple[SourceFrame, float]] = []
         for frame in frames:
             px, py, world_z = project_world_point_into_source_frame(Pc, frame, camera_intrinsics)
             if world_z > 10 and 10 <= px < camera_intrinsics["Wf"] - 10 and 10 <= py < camera_intrinsics["Hf"] - 10:
-                cover.append((frame, np.hypot(px - camera_intrinsics["cxf"], py - camera_intrinsics["cyf"])))
-        cover.sort(key=lambda threshold: threshold[1])
-        cover = [frame for frame, center_distance in cover[: args.max_frames]]
+                cover_candidates.append((frame, np.hypot(px - camera_intrinsics["cxf"], py - camera_intrinsics["cyf"])))
+        cover_candidates.sort(key=lambda threshold: threshold[1])
+        cover = [frame for frame, center_distance in cover_candidates[: args.max_frames]]
 
         nb = len(ms)
         sep = np.zeros((nb, nb))
         seen = np.zeros((nb, nb))
         support = np.zeros(nb)
-        per_frame = []
+        per_frame: list[PerFrameRecord] = []
         for frame in cover:
             # downscale each source frame to ~src_ppmm (matches the composite's
             # scale): at ~20px/mm the pore/texture noise that wrecks the adaptive
@@ -268,7 +398,7 @@ def analyze_reconstruction_ghosts(reg_dir, args):
                 continue
             sblobs = detect_source_frame_lesions(im[sy0:sy1, sx0:sx1], ppmm_s, ch)
             tol = args.match_mm * ppmm_s
-            assign = []
+            assign: list[int] = []
             for px, py, world_z in preds:
                 lx, ly = px / sds - sx0, py / sds - sy0
                 best, bd = -1, tol
@@ -286,7 +416,7 @@ def analyze_reconstruction_ghosts(reg_dir, args):
                         if assign[index] != assign[neighbor_index]:
                             sep[index, neighbor_index] += 1
             per_frame.append(
-                dict(
+                PerFrameRecord(
                     idx=frame["idx"],
                     station=frame["station"],
                     sds=sds,
@@ -300,7 +430,7 @@ def analyze_reconstruction_ghosts(reg_dir, args):
 
         par2 = list(range(nb))
 
-        def find2(candidate_index):
+        def find2(candidate_index: int) -> int:
             while par2[candidate_index] != candidate_index:
                 par2[candidate_index] = par2[par2[candidate_index]]
                 candidate_index = par2[candidate_index]
@@ -331,7 +461,7 @@ def analyze_reconstruction_ghosts(reg_dir, args):
                 f"mm: {nb} composite features, {source_count} real in {len(cover)} "
                 f"source frames -> +{ghost_excess} ghost"
             )
-    return dict(
+    return AnalysisResult(
         tex=tex,
         g=gauge,
         records=records,
@@ -339,11 +469,12 @@ def analyze_reconstruction_ghosts(reg_dir, args):
         phantoms=phantoms,
         n_candidates=len(kept),
         K=camera_intrinsics,
+        _paths=[],
     )
 
 
 # --------------------------------------------------------------------------- #
-def write_reconstruction_ghost_reports(res, out_dir):
+def write_reconstruction_ghost_reports(res: AnalysisResult, out_dir: str) -> None:
     os.makedirs(os.path.join(out_dir, "montage"), exist_ok=True)
     tex, gauge = res["tex"], res["g"]
     ov = tex.copy()
@@ -384,7 +515,10 @@ def write_reconstruction_ghost_reports(res, out_dir):
             )
         tiles = [_label(cv2.resize(cc, (280, 280)), "COMPOSITE")]
         for pf in camera_rotation["per_frame"][:4]:
-            im = load_downscaled_source_frame(_path_for(res, pf["idx"]), pf["sds"])
+            source_path = _path_for(res, pf["idx"])
+            if source_path is None:
+                continue
+            im = load_downscaled_source_frame(source_path, pf["sds"])
             if im is None:
                 continue
             sx0, sy0, sx1, sy1 = pf["crop"]
@@ -402,7 +536,7 @@ def write_reconstruction_ghost_reports(res, out_dir):
             row = np.hstack([cv2.resize(threshold, (280, image_height)) for threshold in tiles])
             cv2.imwrite(os.path.join(out_dir, "montage", f"ghost_{camera_rotation['id']}.png"), row)
 
-    slim = dict(
+    slim = GhostReport(
         reg_dir=out_dir,
         total_ghosts=res["total_ghosts"],
         phantoms=res["phantoms"],
@@ -422,25 +556,26 @@ def write_reconstruction_ghost_reports(res, out_dir):
             if camera_rotation["ghost_excess"] > 0 or camera_rotation["n_phantom"] > 0
         ],
     )
-    json.dump(slim, open(os.path.join(out_dir, "ghost_report.json"), "w"), indent=1)
+    with open(os.path.join(out_dir, "ghost_report.json"), "w") as report_file:
+        json.dump(slim, report_file, indent=1)
 
 
-def _label(img, txt):
+def _label(img: Image, txt: str) -> Image:
     cv2.rectangle(img, (0, 0), (img.shape[1], 22), (0, 0, 0), -1)
     cv2.putText(img, txt, (4, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
     return img
 
 
-_PATHS: dict = {}
+_PATHS: dict[int, str] = {}
 
 
-def _path_for(res, idx):
+def _path_for(res: AnalysisResult, idx: int) -> str | None:
     if not _PATHS:
         _PATHS.update({frame: point for frame, point in res.get("_paths", [])})
     return _PATHS.get(idx)
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -477,7 +612,7 @@ def main():
         default=3,
         help="downscale for the global candidate hunt (locations only)",
     )
-    args = ap.parse_args()
+    args = ap.parse_args(namespace=Arguments())
     reg_dir = args.reg_dir.rstrip("/")
     out_dir = args.out or os.path.join(reg_dir, "ghost-check")
     reconstruction_rig, frames = load_reconstruction_rig_and_frames(reg_dir)

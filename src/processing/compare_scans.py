@@ -33,13 +33,20 @@ import argparse
 import csv
 import json
 import os
+from typing import Any, TypedDict, cast
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 from scipy.ndimage import gaussian_filter
 
 from .alignment import (
     IDENT,
+    AlignmentInfo,
+    AlignmentSelection,
+    ConstellationValidation,
+    MolePair,
+    SharedCanvas,
     apply_scan_alignment_transform,
     compute_shared_texture_canvas,
     validate_mole_constellation_correspondence,
@@ -56,8 +63,29 @@ from .lesions import (
 from .tex_anchor import load_gauge
 from . import track_moles as tm
 
+UInt8Array = npt.NDArray[np.uint8]
+ImageArray = npt.NDArray[np.uint8]
+AffineTransform = npt.NDArray[np.float64]
 
-def main():
+
+class Mole(TypedDict):
+    x: int
+    y: int
+    radius_mm: float
+    diam_mm: float
+    area_mm2: float
+    contrast: float
+    response: float
+
+
+class Repositioning(TypedDict):
+    scale: float
+    rotation_deg: float
+    shift_u_mm: float
+    shift_v_mm: float
+
+
+def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -108,7 +136,10 @@ def main():
     rdB = os.path.join(args.captures, args.scan_b, args.reg_dir)
     out = args.out or os.path.join(args.captures, args.scan_a, f"compare-{args.scan_b}")
     os.makedirs(out, exist_ok=True)
-    diam = tuple(float(world_x) for world_x in args.mole_diam_mm.split(":"))
+    diam = cast(
+        tuple[float, float],
+        tuple(float(world_x) for world_x in args.mole_diam_mm.split(":")),
+    )
 
     gA, gB = load_gauge(rdA), load_gauge(rdB)
     # gauge-consistency assert: the (u,v) frame is only shared if the rig gauge is
@@ -136,10 +167,11 @@ def main():
     melB = melanin_flat(cc["texB"], cc["covB"], args.ppmm, args.bg_mm)
     # erode coverage for detection so coverage-edge wedges aren't flagged as moles
     er = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * args.ppmm) | 1,) * 2)
-    detA = cv2.erode(cc["covA"], er)
-    detB = cv2.erode(cc["covB"], er)
+    detA: UInt8Array = np.asarray(cv2.erode(cc["covA"], er), dtype=np.uint8)
+    detB: UInt8Array = np.asarray(cv2.erode(cc["covB"], er), dtype=np.uint8)
 
     _sift, ainfo = align_scan_textures_globally(cc["texA"], cc["texB"], cc["covA"], cc["covB"], args.ppmm)
+    ainfo = cast(AlignmentInfo, ainfo)
     if ainfo["T_B_to_A"] is not None:
         print(
             f"[2] alignment: {ainfo['matches']} matches, {ainfo['inliers']} inliers, "
@@ -153,12 +185,14 @@ def main():
 
     # moles are detected BEFORE the alignment decision -- they are the fiducial
     # fallback when SIFT can't latch onto the (often near-featureless) skin.
-    molesA = detect_moles(melA, detA, args.ppmm, diam, args.min_contrast, args.k_sigma)
-    molesB = detect_moles(melB, detB, args.ppmm, diam, args.min_contrast, args.k_sigma)
+    molesA: list[Mole] = detect_moles(melA, detA, args.ppmm, diam, args.min_contrast, args.k_sigma)
+    molesB: list[Mole] = detect_moles(melB, detB, args.ppmm, diam, args.min_contrast, args.k_sigma)
     print(f"[4] moles detected: A={len(molesA)}  B={len(molesB)}")
 
     # pick the alignment by mole corroboration + cross-method agreement (shared)
-    al = select_best_scan_alignment(ainfo, molesA, molesB, args.ppmm, max_resid_mm=args.max_resid_mm)
+    al: AlignmentSelection = select_best_scan_alignment(
+        ainfo, cast(Any, molesA), cast(Any, molesB), args.ppmm, max_resid_mm=args.max_resid_mm
+    )
     transform_matrix, align_mode, confidence, n_corrob = (al["T"], al["mode"], al["confidence"], al["n_corrob"])
     mole_inl = al["mole_inl"]
     methods_agree, sift_overwhelming = al["methods_agree"], al["sift_overwhelming"]
@@ -178,13 +212,22 @@ def main():
         f"confidence={confidence.upper()}"
     )
 
-    pairs, onlyA, onlyB = match_scan_moles_after_alignment(molesA, molesB, transform_matrix, args.ppmm, prior_mm)
-    constel = validate_mole_constellation_correspondence(molesA, molesB, pairs, args.ppmm)
+    pairs, onlyA, onlyB = match_scan_moles_after_alignment(
+        cast(Any, molesA), cast(Any, molesB), transform_matrix, args.ppmm, prior_mm
+    )
+    pairs = cast(list[MolePair], pairs)
+    constel: ConstellationValidation = validate_mole_constellation_correspondence(
+        cast(Any, molesA), cast(Any, molesB), pairs, args.ppmm
+    )
 
     # new/disappeared: gate to mutual coverage AND verify the spot isn't merely
     # sub-threshold in the other scan (exposure differs across scans -> a faint
     # mole below the other threshold must NOT be reported as appeared/vanished).
-    Tinv = cv2.invertAffineTransform(transform_matrix) if transform_matrix is not None else IDENT  # A-frame->B
+    Tinv: AffineTransform = (
+        np.asarray(cv2.invertAffineTransform(transform_matrix), dtype=np.float64)
+        if transform_matrix is not None
+        else np.asarray(IDENT, dtype=np.float64)
+    )  # A-frame->B
     # verify against the same lightly-smoothed melanin the detector uses
     melA_s = gaussian_filter(melA, 0.35 * args.ppmm)
     melB_s = gaussian_filter(melB, 0.35 * args.ppmm)
@@ -224,7 +267,16 @@ def main():
     # M2: per matched pair, measure size/shape change in each scan's OWN un-warped
     # frame (the transform is used only to MATCH, never to resample lesion pixels)
     changes, calib = tm.measure_longitudinal_mole_changes(
-        cc, melA, melB, detA, detB, molesA, molesB, pairs, al, args.ppmm
+        cc,
+        melA,
+        melB,
+        detA,
+        detB,
+        cast(Any, molesA),
+        cast(Any, molesB),
+        pairs,
+        cast(tm.Alignment, al),
+        args.ppmm,
     )
     n_grew = sum(1 for candidate in changes if candidate["class"] == "grew")
     n_shrank = sum(1 for candidate in changes if candidate["class"] == "shrank")
@@ -263,12 +315,12 @@ def main():
     # the recovered subject repositioning (B->A), in gantry mm
     if transform_matrix is not None:
         Tn = np.asarray(transform_matrix)
-        reposition = dict(
+        reposition = cast(Repositioning, dict(
             scale=float(np.hypot(Tn[0, 0], Tn[0, 1])),
             rotation_deg=float(np.degrees(np.arctan2(Tn[1, 0], Tn[0, 0]))),
             shift_u_mm=float(Tn[0, 2] / args.ppmm),
             shift_v_mm=float(Tn[1, 2] / args.ppmm),
-        )
+        ))
         print(
             f"  repositioning {args.scan_b}->{args.scan_a}: scale "
             f"{reposition['scale']:.3f}, rot {reposition['rotation_deg']:.2f}deg, "
@@ -348,15 +400,15 @@ def main():
     with open(os.path.join(out, "change_report.json"), "w") as fh:
         json.dump(report, fh, indent=2)
     tm.write_mole_change_results_csv(
-        os.path.join(out, "change_report.csv"), cc, changes, molesB, molesA, new, disappeared
+        os.path.join(out, "change_report.csv"), cc, changes, cast(Any, molesB), cast(Any, molesA), new, disappeared
     )
     tm.render_mole_change_overlay(
         out,
         cc,
         mutual,
         changes,
-        molesA,
-        molesB,
+        cast(Any, molesA),
+        cast(Any, molesB),
         pairs,
         new,
         disappeared,
@@ -365,7 +417,15 @@ def main():
         labels=(args.scan_a, args.scan_b),
     )
     tm.render_mole_change_montage(
-        out, cc, changes, molesA, molesB, pairs, transform_matrix, args.ppmm, labels=(args.scan_a, args.scan_b)
+        out,
+        cc,
+        changes,
+        cast(Any, molesA),
+        cast(Any, molesB),
+        pairs,
+        transform_matrix if transform_matrix is not None else IDENT,
+        args.ppmm,
+        labels=(args.scan_a, args.scan_b),
     )
     cv2.imwrite(os.path.join(out, "common_A.jpg"), cc["texA"], [cv2.IMWRITE_JPEG_QUALITY, 90])
     cv2.imwrite(os.path.join(out, "common_B.jpg"), cc["texB"], [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -377,11 +437,19 @@ def main():
     )
 
 
-def cc_uv(cc, mask):
+def cc_uv(cc: SharedCanvas, mask: Mole) -> tuple[float, float]:
     return (round(cc["umin"] + mask["x"] / cc["ppmm"], 1), round(cc["vmin"] + mask["y"] / cc["ppmm"], 1))
 
 
-def _write_csv(path, cc, molesA, molesB, pairs, new, disappeared):
+def _write_csv(
+    path: str,
+    cc: SharedCanvas,
+    molesA: list[Mole],
+    molesB: list[Mole],
+    pairs: list[MolePair],
+    new: list[int],
+    disappeared: list[int],
+) -> None:
     with open(path, "w", newline="") as fh:
         csv_writer = csv.writer(fh)
         csv_writer.writerow(["type", "u_mm", "v_mm", "diam_a_mm", "diam_b_mm", "resid_mm"])
@@ -405,7 +473,7 @@ def _write_csv(path, cc, molesA, molesB, pairs, new, disappeared):
             csv_writer.writerow(["disappeared", texture_u, texture_v, round(molesA[index]["diam_mm"], 2), "", ""])
 
 
-def _write_detections(path, tex, moles, pixels_per_mm):
+def _write_detections(path: str, tex: ImageArray, moles: list[Mole], pixels_per_mm: float) -> None:
     canvas = tex.copy()
     for mask in moles:
         cv2.circle(canvas, (mask["x"], mask["y"]), int(mask["radius_mm"] * pixels_per_mm) + 3, (0, 255, 255), 2)
@@ -422,7 +490,17 @@ def _write_detections(path, tex, moles, pixels_per_mm):
     cv2.imwrite(path, canvas, [cv2.IMWRITE_JPEG_QUALITY, 88])
 
 
-def _write_overlay(out, cc, mutual, molesA, molesB, pairs, new, disappeared, transform_matrix):
+def _write_overlay(
+    out: str,
+    cc: SharedCanvas,
+    mutual: UInt8Array,
+    molesA: list[Mole],
+    molesB: list[Mole],
+    pairs: list[MolePair],
+    new: list[int],
+    disappeared: list[int],
+    transform_matrix: AffineTransform | None,
+) -> None:
     base = cc["texA"].copy()
     dim = (base.astype(np.float32) * 0.45).astype(np.uint8)
     m3 = mutual[..., None].astype(bool)

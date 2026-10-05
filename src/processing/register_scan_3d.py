@@ -9,6 +9,7 @@ without importing their implementation details.
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 from ._reconstruction.exporter import export_scan_reconstruction_artifacts
@@ -21,7 +22,7 @@ from .registration_geometry import project_world_points_into_camera
 __all__ = ["main", "project_world_points_into_camera"]
 
 
-def main():
+def main() -> None:
     # The box is shared: a runaway allocation must kill this process cleanly,
     # never invoke the kernel OOM killer on other users.
     cap = _apply_processing_memory_limit()
@@ -35,8 +36,8 @@ def main():
         )
 
 
-def _main(mem_cap=None):
-    args = parse_scan_cli_arguments()
+def _main(mem_cap: int | None = None) -> None:
+    args: argparse.Namespace = parse_scan_cli_arguments()
     problem = build_scan_reconstruction_problem(args, mem_cap)
     solution = reconstruct_surface_from_camera_frames(args, problem)
     export_scan_reconstruction_artifacts(args, problem, solution)

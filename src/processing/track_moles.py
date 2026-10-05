@@ -20,22 +20,161 @@ from __future__ import annotations
 
 import math
 import os
+from collections.abc import Callable, Sequence
+from typing import Any, Literal, TypedDict, cast
 
 import cv2
 import numpy as np
+import numpy.typing as npt
 from scipy.ndimage import gaussian_filter, label
 from scipy.interpolate import RBFInterpolator
+
+
+FloatArray = npt.NDArray[np.float64]
+UInt8Array = npt.NDArray[np.uint8]
+BoolArray = npt.NDArray[np.bool_]
+NumericArray = npt.NDArray[Any]
+Contour = NumericArray
+Point = tuple[float, float]
+MoleClass = Literal["stable", "grew", "shrank", "uncertain", "new", "disappeared"]
+
+
+class MoleDetection(TypedDict):
+    """A detector result in image-pixel coordinates."""
+
+    x: float
+    y: float
+    radius_mm: float
+    diam_mm: float
+
+
+class MoleMeasurement(TypedDict):
+    valid: bool
+    peak: float
+    d_eq_mm: float
+    area_mm2: float
+    eccentricity: float
+    major_mm: float
+    minor_mm: float
+    border_irregularity: float
+    perim_mm: float
+    center: tuple[int, int]
+    sigma_diam_meas: float
+    sigma_area_meas: float
+    sigma_m: float
+    gbar: float
+    n_pixels: int
+    reason: str
+
+
+class DetectionUncertainty(TypedDict):
+    sigma_d_eq_mm: float
+    sigma_area_mm2: float
+    sigma_eccentricity: float
+    sigma_border_irregularity: float
+    n: int
+
+
+class Calibration(TypedDict, total=False):
+    k: float
+    floor_diam: float
+    floor_area: float | None
+    uncalibrated: bool
+
+
+class AlignmentCorrespondences(TypedDict):
+    dst_px: Sequence[Point]
+    resid_mm: Sequence[float]
+
+
+class Alignment(TypedDict):
+    corr: AlignmentCorrespondences | None
+
+
+class MolePair(TypedDict):
+    iA: int
+    iB: int
+    resid_mm: float
+
+
+class CommonFrame(TypedDict):
+    umin: float
+    vmin: float
+    ppmm: float
+    texA: UInt8Array
+    texB: UInt8Array
+
+
+MoleChangeMetrics = TypedDict(
+    "MoleChangeMetrics",
+    {
+        "d_eq_a_mm": float,
+        "d_eq_b_mm": float,
+        "delta_diam_mm": float,
+        "sigma_diam_mm": float,
+        "z_diam": float,
+        "area_a_mm2": float,
+        "area_b_mm2": float,
+        "delta_area_mm2": float,
+        "sigma_area_mm2": float,
+        "ecc_a": float,
+        "ecc_b": float,
+        "border_a": float,
+        "border_b": float,
+        "sigma_reg_mm": float,
+        "significant": bool,
+        "valid": bool,
+        "class": MoleClass,
+    },
+    total=True,
+)
+MoleChange = TypedDict(
+    "MoleChange",
+    {
+        "d_eq_a_mm": float,
+        "d_eq_b_mm": float,
+        "delta_diam_mm": float,
+        "sigma_diam_mm": float,
+        "z_diam": float,
+        "area_a_mm2": float,
+        "area_b_mm2": float,
+        "delta_area_mm2": float,
+        "sigma_area_mm2": float,
+        "ecc_a": float,
+        "ecc_b": float,
+        "border_a": float,
+        "border_b": float,
+        "sigma_reg_mm": float,
+        "significant": bool,
+        "valid": bool,
+        "class": MoleClass,
+        "id": str,
+        "uv_a_mm": list[float],
+        "resid_mm": float,
+    },
+    total=True,
+)
 
 
 # --------------------------------------------------------------------------- #
 # Size & shape measurement (one scan's own un-warped frame)
 # --------------------------------------------------------------------------- #
-def _disk_mask(shape, center_x_px, center_y_px, radius_px):
+def _disk_mask(
+    shape: tuple[int, int], center_x_px: float, center_y_px: float, radius_px: float
+) -> BoolArray:
     yy, xx = np.ogrid[: shape[0], : shape[1]]
     return (xx - center_x_px) ** 2 + (yy - center_y_px) ** 2 <= radius_px * radius_px
 
 
-def _local_baseline(bump, cov, cx, cy, r_in, r_out, other_mask):
+def _local_baseline(
+    bump: NumericArray,
+    cov: NumericArray,
+    cx: float,
+    cy: float,
+    r_in: float,
+    r_out: float,
+    other_mask: BoolArray,
+) -> float:
     """Robust skin baseline from an annulus around the mole (inside coverage,
     excluding other moles)."""
     yy, xx = np.ogrid[: bump.shape[0], : bump.shape[1]]
@@ -45,10 +184,13 @@ def _local_baseline(bump, cov, cx, cy, r_in, r_out, other_mask):
     return float(np.median(vals)) if vals.size >= 20 else 0.0
 
 
-def _iso_region(bump, level, cx, cy, pixels_per_mm):
+def _iso_region(
+    bump: NumericArray, level: float, cx: float, cy: float, pixels_per_mm: float
+) -> tuple[NumericArray | None, Contour | None, int]:
     """Half-max connected component containing (cx,cy), closed, + its contour."""
     binary = (bump >= level).astype(np.uint8)
-    lab, item_count = label(binary)
+    label_result = cast(tuple[NumericArray, int], label(binary))
+    lab, item_count = label_result
     if item_count == 0:
         return None, None, 0
     cl = lab[int(round(cy)), int(round(cx))]
@@ -67,8 +209,15 @@ def _iso_region(bump, level, cx, cy, pixels_per_mm):
 
 
 def measure_mole_size(
-    melanin_image, coverage_mask, mole_detection, pixels_per_mm, iso_fraction=0.5, presmoothing_sigma_mm=0.35, peak_core_radius_mm=0.5, other_mole_detections=None
-):
+    melanin_image: NumericArray,
+    coverage_mask: NumericArray,
+    mole_detection: MoleDetection,
+    pixels_per_mm: float,
+    iso_fraction: float = 0.5,
+    presmoothing_sigma_mm: float = 0.35,
+    peak_core_radius_mm: float = 0.5,
+    other_mole_detections: Sequence[MoleDetection] | None = None,
+) -> MoleMeasurement:
     """Half-max iso-contour measurement of one detected mole in one scan's melanin map.
 
     Returns equivalent_diameter_mm, region_area_mm2, eccentricity, major/minor_axis_length_mm, border_irregularity,
@@ -105,7 +254,7 @@ def measure_mole_size(
     # robust peak in a small disk at the LoG center; refine the center using the core mask
     peak_core_mask = _disk_mask((sz, sz), patch_center_x, patch_center_y, peak_core_radius_mm * pixels_per_mm)
     peak_contrast = float(np.percentile(contrast_bump[peak_core_mask], 95)) if peak_core_mask.any() else float(contrast_bump.max())
-    measurement_result = dict(
+    measurement_result: MoleMeasurement = MoleMeasurement(
         valid=False,
         peak=peak_contrast,
         d_eq_mm=float("nan"),
@@ -190,7 +339,7 @@ def measure_mole_size(
         center=(int(round(x0 + patch_center_x)), int(round(y0 + patch_center_y))),
         sigma_diam_meas=diameter_measurement_sigma_mm,
         sigma_area_meas=area_measurement_sigma_mm,
-        sigma_m=boundary_contrast_sigma,
+        sigma_m=float(boundary_contrast_sigma),
         gbar=mean_boundary_gradient,
         n_pixels=region_area_pixels,
         reason=("" if measurement_valid else ("edge" if touches_edge else f"solidity {region_solidity:.2f}")),
@@ -201,7 +350,7 @@ def measure_mole_size(
 # --------------------------------------------------------------------------- #
 # Uncertainty model
 # --------------------------------------------------------------------------- #
-def load_mole_change_calibration(path=None):
+def load_mole_change_calibration(path: str | os.PathLike[str] | None = None) -> Calibration:
     """Same-scan-null calibration {k, floor_diam, floor_area}; conservative
     defaults if no calibration file exists."""
     import json
@@ -211,10 +360,17 @@ def load_mole_change_calibration(path=None):
         distance = json.load(open(path))
         distance.setdefault("uncalibrated", False)
         return distance
-    return dict(k=2.5, floor_diam=0.30, floor_area=None, uncalibrated=True)
+    return Calibration(k=2.5, floor_diam=0.30, floor_area=None, uncalibrated=True)
 
 
-def estimate_mole_detection_position_sigma(mel, cov, mole, pixels_per_mm, jittered_sample_count=24, random_seed=0):
+def estimate_mole_detection_position_sigma(
+    mel: NumericArray,
+    cov: NumericArray,
+    mole: MoleDetection,
+    pixels_per_mm: float,
+    jittered_sample_count: int = 24,
+    random_seed: int = 0,
+) -> DetectionUncertainty:
     """Detector-repeatability sigma: std of the size measurement over N rigidly-
     jittered, noise-added copies of the mole's own melanin_crop. Uses the scan's own
     robust skin noise, so a fainter/brighter scan gets the appropriately larger
@@ -233,9 +389,16 @@ def estimate_mole_detection_position_sigma(mel, cov, mole, pixels_per_mm, jitter
     coverage_crop[sy0 - crop_origin_y : sy1 - crop_origin_y, sx0 - crop_origin_x : sx1 - crop_origin_x] = cov[sy0:sy1, sx0:sx1]
     random_generator = np.random.default_rng(random_seed)
     measurement_names = ("d_eq_mm", "area_mm2", "eccentricity", "border_irregularity")
-    measurement_samples = {measurement_name: [] for measurement_name in measurement_names}
+    measurement_samples: dict[str, list[float]] = {
+        measurement_name: [] for measurement_name in measurement_names
+    }
     patch_center_px = crop_half_size_px
-    synthetic_mole = dict(x=patch_center_px, y=patch_center_px, radius_mm=mole_radius_mm)
+    synthetic_mole: MoleDetection = {
+        "x": patch_center_px,
+        "y": patch_center_px,
+        "radius_mm": mole_radius_mm,
+        "diam_mm": 2.0 * mole_radius_mm,
+    }
     for iteration_index in range(jittered_sample_count):
         translation_jitter_x, translation_jitter_y = random_generator.uniform(-0.5, 0.5, 2)
         rotation_angle_degrees = random_generator.uniform(-1, 1)
@@ -251,14 +414,17 @@ def estimate_mole_detection_position_sigma(mel, cov, mole, pixels_per_mm, jitter
         if mole_measurement["valid"] and np.isfinite(mole_measurement["d_eq_mm"]):
             for measurement_name in measurement_names:
                 measurement_samples[measurement_name].append(mole_measurement[measurement_name])
-    measurement_sigmas = {
+    measurement_sigmas = cast(DetectionUncertainty, {
         "sigma_" + measurement_name: (float(np.std(measurement_samples[measurement_name])) if len(measurement_samples[measurement_name]) >= 5 else float("nan")) for measurement_name in measurement_names
-    }
+    })
     measurement_sigmas["n"] = len(measurement_samples["d_eq_mm"])
     return measurement_sigmas
 
 
-def build_mole_alignment_residual_field(corr, pixels_per_mm):
+def build_mole_alignment_residual_field(
+    corr: AlignmentCorrespondences | None,
+    pixels_per_mm: float,
+) -> Callable[[NumericArray], FloatArray]:
     """Smooth field: A-frame position (px) -> registration sigma (mm), from the
     winning alignment's per-correspondence residual. RBF when SIFT-dense & wide;
     IDW for the sparse mole-constellation; flat 1mm when uncorroborated."""
@@ -272,7 +438,7 @@ def build_mole_alignment_residual_field(corr, pixels_per_mm):
         rbf = RBFInterpolator(src, res, kernel="thin_plate_spline", smoothing=score)
         return lambda points: np.clip(rbf(np.atleast_2d(points)), 0, None)
 
-    def idw(points):
+    def idw(points: NumericArray) -> FloatArray:
         points = np.atleast_2d(points)
         estimated_uncertainties = []
         for point in points:
@@ -284,7 +450,14 @@ def build_mole_alignment_residual_field(corr, pixels_per_mm):
     return idw
 
 
-def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, calib):
+def combine_mole_measurements_and_flag_change(
+    sa: MoleMeasurement,
+    sb: MoleMeasurement,
+    da: DetectionUncertainty,
+    db: DetectionUncertainty,
+    sigma_pos_mm: float,
+    calib: Calibration,
+) -> MoleChangeMetrics:
     """Combine registration + detector + null-floor sigmas in quadrature; classify
     grew/shrank/stable with a significance gate (|z|>=k AND |delta|>=floor)."""
     item_index = calib.get("k", 2.5)
@@ -294,7 +467,7 @@ def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, cali
     sig_reg_d = math.sqrt(2) * sigma_pos_mm
     sig_reg_a = (math.pi * d_ref / 2) * sig_reg_d
 
-    def quadrature_sum(*uncertainty_components):
+    def quadrature_sum(*uncertainty_components: float | None) -> float:
         finite_component_squares = (
             (component or 0.0) ** 2
             for component in uncertainty_components
@@ -314,7 +487,7 @@ def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, cali
         if not valid
         else ("grew" if sig and dd > 0 else "shrank" if sig and dd < 0 else "stable")
     )
-    return dict(
+    result = dict(
         d_eq_a_mm=round(sa["d_eq_mm"], 2),
         d_eq_b_mm=round(sb["d_eq_mm"], 2),
         delta_diam_mm=round(dd, 2),
@@ -333,13 +506,26 @@ def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, cali
         valid=valid,
         **{"class": cls},
     )
+    return cast(MoleChangeMetrics, result)
 
 
-def assign_stable_mole_lesion_id(uv):
+def assign_stable_mole_lesion_id(uv: Point) -> str:
     return f"M{int(round(uv[0]))}_{int(round(uv[1]))}"
 
 
-def measure_longitudinal_mole_changes(cc, melA, melB, detA, detB, molesA, molesB, pairs, al, pixels_per_mm, calib=None):
+def measure_longitudinal_mole_changes(
+    cc: CommonFrame,
+    melA: NumericArray,
+    melB: NumericArray,
+    detA: NumericArray,
+    detB: NumericArray,
+    molesA: Sequence[MoleDetection],
+    molesB: Sequence[MoleDetection],
+    pairs: Sequence[MolePair],
+    al: Alignment,
+    pixels_per_mm: float,
+    calib: Calibration | None = None,
+) -> tuple[list[MoleChange], Calibration]:
     """Per matched pair: measure size in each scan's OWN un-warped frame, attach
     registration + detector uncertainty, classify change. Returns (list, calib)."""
     calib = calib or load_mole_change_calibration()
@@ -355,10 +541,11 @@ def measure_longitudinal_mole_changes(cc, melA, melB, detA, detB, molesA, molesB
         ch = combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos, calib)
         texture_u = round(cc["umin"] + mA["x"] / pixels_per_mm, 1)
         texture_v = round(cc["vmin"] + mA["y"] / pixels_per_mm, 1)
-        ch["id"] = assign_stable_mole_lesion_id((texture_u, texture_v))
-        ch["uv_a_mm"] = [texture_u, texture_v]
-        ch["resid_mm"] = round(point["resid_mm"], 2)
-        out.append(ch)
+        complete_change: dict[str, object] = dict(ch)
+        complete_change["id"] = assign_stable_mole_lesion_id((texture_u, texture_v))
+        complete_change["uv_a_mm"] = [texture_u, texture_v]
+        complete_change["resid_mm"] = round(point["resid_mm"], 2)
+        out.append(cast(MoleChange, complete_change))
     return out, calib
 
 
@@ -376,7 +563,15 @@ _CLASS_BGR = {
 _IDENTITY = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 
-def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ):
+def write_mole_change_results_csv(
+    path: str | os.PathLike[str],
+    cc: CommonFrame,
+    changes: Sequence[MoleChange],
+    molesB: Sequence[MoleDetection],
+    molesA: Sequence[MoleDetection],
+    newJ: Sequence[int],
+    disJ: Sequence[int],
+) -> None:
     import csv
 
     pp = cc["ppmm"]
@@ -452,20 +647,20 @@ def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ)
 
 
 def render_mole_change_overlay(
-    out,
-    cc,
-    mutual,
-    changes,
-    molesA,
-    molesB,
-    pairs,
-    newJ,
-    disJ,
-    transform_matrix=None,
-    pixels_per_mm=None,
-    labels=("A", "B"),
-    **legacy_options,
-):
+    out: str | os.PathLike[str],
+    cc: CommonFrame,
+    mutual: NumericArray,
+    changes: Sequence[MoleChange],
+    molesA: Sequence[MoleDetection],
+    molesB: Sequence[MoleDetection],
+    pairs: Sequence[MolePair],
+    newJ: Sequence[int],
+    disJ: Sequence[int],
+    transform_matrix: NumericArray | None = None,
+    pixels_per_mm: float | None = None,
+    labels: tuple[str, str] = ("A", "B"),
+    **legacy_options: Any,
+) -> None:
     transform_matrix = legacy_options.pop("T", transform_matrix)
     pixels_per_mm = legacy_options.pop("ppmm", pixels_per_mm)
     if legacy_options:
@@ -481,14 +676,15 @@ def render_mole_change_overlay(
         col = _CLASS_BGR.get(candidate["class"], (0, 200, 0))
         ra = int(max(candidate["d_eq_a_mm"], 0.5) / 2 * pixels_per_mm) + 2
         rb = int(max(candidate["d_eq_b_mm"], 0.5) / 2 * pixels_per_mm) + 2
-        cv2.circle(canvas, (mA["x"], mA["y"]), ra, col, 2)  # baseline size
-        cv2.circle(canvas, (mA["x"], mA["y"]), rb, col, 1)  # follow-up size
+        center = (int(mA["x"]), int(mA["y"]))
+        cv2.circle(canvas, center, ra, col, 2)  # baseline size
+        cv2.circle(canvas, center, rb, col, 1)  # follow-up size
         tag = f"{candidate['delta_diam_mm']:+.1f}mm" if candidate["class"] in ("grew", "shrank") else candidate["class"][:4]
         star = "*" if candidate["significant"] else ""
         cv2.putText(
             canvas,
             f"{tag}{star}",
-            (mA["x"] + rb + 4, mA["y"]),
+            (center[0] + rb + 4, center[1]),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
             col,
@@ -505,7 +701,7 @@ def render_mole_change_overlay(
     for index in disJ:
         cv2.circle(
             canvas,
-            (molesA[index]["x"], molesA[index]["y"]),
+            (int(molesA[index]["x"]), int(molesA[index]["y"])),
             int(molesA[index]["radius_mm"] * pixels_per_mm) + 6,
             _CLASS_BGR["disappeared"],
             3,
@@ -525,7 +721,7 @@ def render_mole_change_overlay(
     cv2.imwrite(os.path.join(out, "change_overlay.png"), canvas)
 
 
-def _crop(img, cx, cy, half):
+def _crop(img: UInt8Array, cx: float, cy: float, half: int) -> UInt8Array:
     image_height, image_width = img.shape[:2]
     crop = np.full((2 * half, 2 * half, 3), (40, 40, 40), np.uint8)
     x0, y0 = int(cx) - half, int(cy) - half
@@ -536,8 +732,17 @@ def _crop(img, cx, cy, half):
 
 
 def render_mole_change_montage(
-    out, cc, changes, molesA, molesB, pairs, transform_matrix, pixels_per_mm, crop_mm=12.0, labels=("A", "B")
-):
+    out: str | os.PathLike[str],
+    cc: CommonFrame,
+    changes: Sequence[MoleChange],
+    molesA: Sequence[MoleDetection],
+    molesB: Sequence[MoleDetection],
+    pairs: Sequence[MolePair],
+    transform_matrix: NumericArray,
+    pixels_per_mm: float,
+    crop_mm: float = 12.0,
+    labels: tuple[str, str] = ("A", "B"),
+) -> None:
     half = int(crop_mm / 2 * pixels_per_mm)
     order = sorted(range(len(changes)), key=lambda index: -abs(changes[index]["z_diam"]))
     rows = []

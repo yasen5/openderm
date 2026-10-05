@@ -14,12 +14,18 @@ total_doublings is the scalar to drive to ZERO across render settings.
 """
 
 from __future__ import annotations
-import argparse, os
+
+import argparse
+import os
+from dataclasses import dataclass
+from typing import Any, Literal, TypedDict
+
 import numpy as np
 import cv2
+from numpy.typing import NDArray
 from scipy.ndimage import maximum_filter
 
-from processing.tex_anchor import load_gauge, coverage_mask
+from processing.tex_anchor import Gauge, load_gauge, coverage_mask
 from processing.lesions import (
     detect_angiomas,
     detect_moles,
@@ -28,8 +34,61 @@ from processing.lesions import (
 )
 from processing.ghost_check import load_reconstruction_rig_and_frames, build_texture_uv_to_world_interpolator, project_world_point_into_source_frame, load_downscaled_source_frame
 
+Image = NDArray[Any]
+Mask = NDArray[np.uint8]
+ChannelName = Literal["mel", "hem"]
+Verdict = Literal["unknown", "distinct", "DOUBLING", "weak"]
+Pair = tuple[float, int, int, int, int, float, ChannelName]
+ConfirmedPair = tuple[float, int, int, int, int, float, ChannelName, Verdict, int, int, int]
+GridCell = tuple[int, int]
+PairKey = tuple[GridCell, GridCell]
 
-def measure_source_feature_contrast_zscore(source_image, pixel_x, pixel_y, pixels_per_mm, channel_name):
+
+class Lesion(TypedDict):
+    x: int
+    y: int
+    radius_mm: float
+
+
+class Candidate(TypedDict):
+    pixel_x: int
+    pixel_y: int
+    radius: float
+    ch: ChannelName
+
+
+class DoublingResult(TypedDict):
+    texture_gauge: Gauge
+    tex: Image
+    pixels_per_mm: float
+    pairs: list[Pair]
+    n_seeds: int
+    confirmed: list[ConfirmedPair]
+
+
+@dataclass
+class Arguments:
+    reg_dir: str = ""
+    out: str | None = None
+    patch_mm: float = 5.0
+    search_mm: float = 22.0
+    min_offset_mm: float = 3.0
+    ncc: float = 0.5
+    k_sigma: float = 3.5
+    min_std: float = 4.0
+    no_confirm: bool = False
+    z_thresh: float = 3.5
+    src_ppmm: float = 20.0
+    min_cover: int = 3
+
+
+def measure_source_feature_contrast_zscore(
+    source_image: Image,
+    pixel_x: float,
+    pixel_y: float,
+    pixels_per_mm: float,
+    channel_name: ChannelName,
+) -> float:
     """Feature-vs-skin z-score at a KNOWN pixel: how much darker (mole) or redder
     (angioma) the spot is than its own local skin ring, in robust-sigma units.
     Robust to raw-frame pore noise because it's a local contrast at a fixed
@@ -63,19 +122,21 @@ def measure_source_feature_contrast_zscore(source_image, pixel_x, pixel_y, pixel
     return (float(np.median(feature_core_values)) - skin_median) / skin_mad
 
 
-def detect_texture_doubling_candidates(texture, coverage, pixels_per_mm, robust_sigma_multiplier):
+def detect_texture_doubling_candidates(
+    texture: Image, coverage: Mask, pixels_per_mm: float, robust_sigma_multiplier: float
+) -> tuple[list[Candidate], Mask]:
     er = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * pixels_per_mm) | 1,) * 2)
-    detection_coverage_mask = cv2.erode(coverage, er)
+    detection_coverage_mask: Mask = np.asarray(cv2.erode(coverage, er), dtype=np.uint8)
     melanin_channel = melanin_flat(texture, coverage, pixels_per_mm)
     hemoglobin_channel = hemoglobin_flat(texture, coverage, pixels_per_mm)
     candidate_features = [
-        dict(pixel_x=mole["x"], pixel_y=mole["y"], radius=mole["radius_mm"], ch="mel")
+        Candidate(pixel_x=mole["x"], pixel_y=mole["y"], radius=mole["radius_mm"], ch="mel")
         for mole in detect_moles(
             melanin_channel, detection_coverage_mask, pixels_per_mm,
             robust_sigma_multiplier=robust_sigma_multiplier
         )
     ] + [
-        dict(pixel_x=angioma["x"], pixel_y=angioma["y"], radius=angioma["radius_mm"], ch="hem")
+        Candidate(pixel_x=angioma["x"], pixel_y=angioma["y"], radius=angioma["radius_mm"], ch="hem")
         for angioma in detect_angiomas(
             texture, hemoglobin_channel, melanin_channel, detection_coverage_mask,
             pixels_per_mm, k_sigma=robust_sigma_multiplier
@@ -84,10 +145,12 @@ def detect_texture_doubling_candidates(texture, coverage, pixels_per_mm, robust_
     return candidate_features, detection_coverage_mask
 
 
-def find_texture_doublings(reg_dir, args):
+def find_texture_doublings(reg_dir: str, args: Arguments) -> DoublingResult:
     texture_gauge = load_gauge(reg_dir)
     pixels_per_mm = texture_gauge.ppmm
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
+    if tex is None:
+        raise ValueError(f"Could not read texture image from {reg_dir!r}")
     cov = coverage_mask(reg_dir)
     gray = cv2.cvtColor(tex, cv2.COLOR_BGR2GRAY).astype(np.float32)
     cand, dm = detect_texture_doubling_candidates(tex, cov, pixels_per_mm, args.k_sigma)
@@ -98,9 +161,9 @@ def find_texture_doublings(reg_dir, args):
     sr = int(args.search_mm * pixels_per_mm)  # half search window
     excl = int(args.min_offset_mm * pixels_per_mm)
     image_height, image_width = gray.shape
-    pairs = []
+    pairs: list[Pair] = []
     for score in cand:
-        pixel_x, pixel_y = score["x"], score["y"]
+        pixel_x, pixel_y = score["pixel_x"], score["pixel_y"]
         if pixel_x - pr < 0 or pixel_y - pr < 0 or pixel_x + pr >= image_width or pixel_y + pr >= image_height:
             continue
         patch = gray[pixel_y - pr : pixel_y + pr, pixel_x - pr : pixel_x + pr]
@@ -128,7 +191,8 @@ def find_texture_doublings(reg_dir, args):
             )
     # dedupe symmetric / overlapping pairs: canonical unordered key at ~3mm grid
     pairs.sort(reverse=True)
-    seen, uniq = set(), []
+    seen: set[PairKey] = set()
+    uniq: list[Pair] = []
     deduplication_grid_size_px = max(1, int(3 * pixels_per_mm))
     for point in pairs:
         ncc, pixel_x, pixel_y, dx, dy, off, ch = point
@@ -145,12 +209,19 @@ def find_texture_doublings(reg_dir, args):
             continue
         seen.add(key)
         uniq.append(point)
-    return dict(texture_gauge=texture_gauge, tex=tex, pixels_per_mm=pixels_per_mm, pairs=uniq, n_seeds=len(cand))
+    return DoublingResult(
+        texture_gauge=texture_gauge,
+        tex=tex,
+        pixels_per_mm=pixels_per_mm,
+        pairs=uniq,
+        n_seeds=len(cand),
+        confirmed=[],
+    )
 
 
-def write_texture_doubling_reports(res, out_dir):
+def write_texture_doubling_reports(res: DoublingResult, out_dir: str) -> None:
     os.makedirs(os.path.join(out_dir, "pairs"), exist_ok=True)
-    tex, pixels_per_mm = res["tex"], res["ppmm"]
+    tex, pixels_per_mm = res["tex"], res["pixels_per_mm"]
     ov = tex.copy()
     for item_index, (ncc, pixel_x, pixel_y, dx, dy, off, ch) in enumerate(res["pairs"]):
         cv2.circle(ov, (pixel_x, pixel_y), 16, (0, 0, 255), 3)
@@ -188,16 +259,18 @@ def write_texture_doubling_reports(res, out_dir):
     cv2.imwrite(os.path.join(out_dir, "doublings_overlay.png"), ov)
 
 
-def confirm_texture_doublings_from_source_frames(res, reg_dir, args):
+def confirm_texture_doublings_from_source_frames(
+    res: DoublingResult, reg_dir: str, args: Arguments
+) -> list[ConfirmedPair]:
     """For each NCC candidate pair A<->B, use the SOURCE frames as ground truth:
     if it's one real feature doubled, NO single frame can show a strong feature
     at BOTH placements; two genuinely-distinct lesions appear at both in most
     covering frames. Returns pairs with a verdict + evidence."""
-    texture_gauge = res["g"]
+    texture_gauge = res["texture_gauge"]
     camera_intrinsics, frames = load_reconstruction_rig_and_frames(reg_dir)
     uv2w = build_texture_uv_to_world_interpolator(reg_dir, texture_gauge)
     zt = args.z_thresh
-    out = []
+    out: list[ConfirmedPair] = []
     for ncc, pixel_x, pixel_y, dx, dy, off, ch in res["pairs"]:
         uA = texture_gauge.px_to_uv(pixel_x, pixel_y)
         uB = texture_gauge.px_to_uv(dx, dy)
@@ -242,7 +315,7 @@ def confirm_texture_doublings_from_source_frames(res, reg_dir, args):
     return out
 
 
-def main():
+def main() -> None:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
@@ -255,7 +328,7 @@ def main():
     ap.add_argument("--k-sigma", type=float, default=3.5)
     ap.add_argument("--min-std", type=float, default=4.0)
     ap.add_argument(
-        "--no-confirm_texture_doublings_from_source_frames", action="store_true", help="skip the source-frame ground-truth confirmation"
+        "--no-confirm_texture_doublings_from_source_frames", dest="no_confirm", action="store_true", help="skip the source-frame ground-truth confirmation"
     )
     ap.add_argument(
         "--z-thresh",
@@ -265,7 +338,7 @@ def main():
     )
     ap.add_argument("--src-ppmm", type=float, default=20.0)
     ap.add_argument("--min-cover", type=int, default=3)
-    args = ap.parse_args()
+    args = ap.parse_args(namespace=Arguments())
     reg = args.reg_dir.rstrip("/")
     out = args.out or os.path.join(reg, "doublings")
     res = find_texture_doublings(reg, args)
@@ -280,7 +353,7 @@ def main():
     conf.sort(key=lambda candidate: (order[candidate[7]], -candidate[0]))
     ndbl = 0
     for ncc, pixel_x, pixel_y, dx, dy, off, ch, verdict, both, alone, ncov in conf:
-        texture_u, texture_v = map_gauge_coordinates_to_texture_uv(res["g"], pixel_x, pixel_y)
+        texture_u, texture_v = map_gauge_coordinates_to_texture_uv(res["texture_gauge"], pixel_x, pixel_y)
         if verdict == "DOUBLING":
             ndbl += 1
         if verdict in ("DOUBLING", "distinct"):
@@ -296,7 +369,9 @@ def main():
     )
 
 
-def map_gauge_coordinates_to_texture_uv(texture_gauge, pixel_x, pixel_y):
+def map_gauge_coordinates_to_texture_uv(
+    texture_gauge: Gauge, pixel_x: int, pixel_y: int
+) -> tuple[float, float]:
     texture_u, texture_v = texture_gauge.px_to_uv(pixel_x, pixel_y)
     return float(texture_u), float(texture_v)
 

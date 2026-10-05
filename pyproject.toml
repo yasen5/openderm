@@ -45,6 +45,7 @@ collision = [
 dev = [
     "pydantic>=2.6",
     "pytest>=8.3,<9",
+    "pyright==1.1.411",
     "ruff==0.15.14",
 ]
 
@@ -105,3 +106,10 @@ ignore = [
     # ``from .config import *``; names are bounded by config.__all__.
     "F405",
 ]
+
+[tool.pyright]
+include = ["src/processing"]
+pythonVersion = "3.11"
+typeCheckingMode = "standard"
+reportMissingParameterType = "error"
+reportMissingTypeArgument = "error"

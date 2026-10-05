@@ -7,28 +7,65 @@ import json
 import os
 import sysconfig
 from pathlib import Path
+from typing import Any, Protocol, TypedDict, cast
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
+from .registration_features import Frame
+from .registration_geometry import FloatArray, RigModel, RotationArray
 from .registration_geometry import undistort_image_points_to_normalized_camera
+from .registration_surface import Surface, TexParam
+
+Float32Array = NDArray[np.float32]
+Int64Array = NDArray[np.int64]
+
+
+class ViewerStats(TypedDict):
+    capture: str
+    n_frames: int
+    n_landmarks: int
+    rms_px: str
+    rms_mm: str
+    px_per_mm: str
+    area_cm2: str
+
+
+class _ThreeDAxes(Protocol):
+    def plot_surface(self, *args: object, **kwargs: object) -> object: ...
+    def scatter(self, *args: object, **kwargs: object) -> object: ...
+    def plot(self, *args: object, **kwargs: object) -> object: ...
+    def set_xlabel(self, label: str) -> object: ...
+    def set_ylabel(self, label: str) -> object: ...
+    def set_zlabel(self, label: str) -> object: ...
+    def set_title(self, label: str) -> object: ...
+    def get_xlim3d(self) -> tuple[float, float]: ...
+    def get_ylim3d(self) -> tuple[float, float]: ...
+    def get_zlim3d(self) -> tuple[float, float]: ...
+    def set_xlim3d(self, left: float, right: float) -> object: ...
+    def set_ylim3d(self, left: float, right: float) -> object: ...
+    def set_zlim3d(self, left: float, right: float) -> object: ...
 
 
 # ----------------------------------------------------------------------------
 # mesh build + exports
 # ----------------------------------------------------------------------------
 def build_surface_mesh(
-    surf,
-    texture_parameters,
-    tex_bounds,
-    wacc,
-    pixels_per_mm=None,
-    mesh_pitch=None,
-    up_sign=1.0,
-    mesh_smooth=(0.0, 0.0),
-    **legacy_options,
-):
-    pixels_per_mm = legacy_options.pop("ppmm", pixels_per_mm)
+    surf: Surface,
+    texture_parameters: TexParam,
+    tex_bounds: tuple[float, float, float, float],
+    wacc: NDArray[np.float32],
+    pixels_per_mm: float | None = None,
+    mesh_pitch: float | None = None,
+    up_sign: float = 1.0,
+    mesh_smooth: tuple[float, float] = (0.0, 0.0),
+    **legacy_options: object,
+) -> tuple[Float32Array, Float32Array, Float32Array, Int64Array]:
+    legacy_pixels_per_mm = legacy_options.pop("ppmm", pixels_per_mm)
+    if legacy_pixels_per_mm is not None and not isinstance(legacy_pixels_per_mm, (int, float)):
+        raise TypeError("pixels_per_mm must be a number")
+    pixels_per_mm = float(legacy_pixels_per_mm) if legacy_pixels_per_mm is not None else None
     if legacy_options:
         unexpected_option = next(iter(legacy_options))
         raise TypeError(f"build_surface_mesh got an unexpected keyword argument {unexpected_option!r}")
@@ -98,7 +135,13 @@ def build_surface_mesh(
     return pos, nrm, uvn, faces
 
 
-def export_surface_mesh_obj(out_dir, pos, nrm, uvn, faces):
+def export_surface_mesh_obj(
+    out_dir: str | os.PathLike[str],
+    pos: Float32Array,
+    nrm: Float32Array,
+    uvn: Float32Array,
+    faces: NDArray[np.integer[Any]],
+) -> None:
     mtl = os.path.join(out_dir, "surface_mesh.mtl")
     with open(mtl, "w") as fh:
         fh.write("newmtl skin\nKa 1 1 1\nKd 1 1 1\nKs 0 0 0\nmap_Kd texture.jpg\n")
@@ -129,7 +172,9 @@ def export_surface_mesh_obj(out_dir, pos, nrm, uvn, faces):
     print(f"      wrote {objp}")
 
 
-def export_surface_landmarks_ply(out_dir, landmark_points, track_err):
+def export_surface_landmarks_ply(
+    out_dir: str | os.PathLike[str], landmark_points: FloatArray, track_err: FloatArray
+) -> None:
     reprojection_error = np.clip(track_err / max(track_err.max(), 1e-6), 0, 1)
     col = np.stack([(reprojection_error * 255), (1 - reprojection_error) * 255, np.zeros_like(reprojection_error)], 1).astype(np.uint8)
     path = os.path.join(out_dir, "landmarks.ply")
@@ -150,14 +195,22 @@ def export_surface_landmarks_ply(out_dir, landmark_points, track_err):
     print(f"      wrote {path}")
 
 
-def render_reconstruction_overview_png(out_dir, frames, camera_rotations, camera_centers, rig_model, surf, landmark_points):
+def render_reconstruction_overview_png(
+    out_dir: str | os.PathLike[str],
+    frames: list[Frame],
+    camera_rotations: RotationArray,
+    camera_centers: FloatArray,
+    rig_model: RigModel,
+    surf: Surface,
+    landmark_points: FloatArray,
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     fig = plt.figure(figsize=(13, 9))
-    ax = fig.add_subplot(111, projection="3d")
+    ax = cast(_ThreeDAxes, fig.add_subplot(111, projection="3d"))
     step = max(1, len(surf.xs) // 60)
     Xs, Ys = np.meshgrid(surf.xs[::step], surf.ys[::step])
     ax.plot_surface(
@@ -193,11 +246,23 @@ def render_reconstruction_overview_png(out_dir, frames, camera_rotations, camera
 # ----------------------------------------------------------------------------
 # interactive viewer (self-contained HTML, embedded three.js)
 # ----------------------------------------------------------------------------
-def _b64(arr) -> str:
+def _b64(arr: NDArray[np.generic]) -> str:
     return base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode()
 
 
-def export_surface_viewer_html(out_dir, frames, camera_rotations, camera_centers, rig_model, pos, uvn, faces, landmark_points, track_err, stats):
+def export_surface_viewer_html(
+    out_dir: str | os.PathLike[str],
+    frames: list[Frame],
+    camera_rotations: RotationArray,
+    camera_centers: FloatArray,
+    rig_model: RigModel,
+    pos: Float32Array,
+    uvn: Float32Array,
+    faces: NDArray[np.integer[Any]],
+    landmark_points: FloatArray,
+    track_err: FloatArray,
+    stats: ViewerStats,
+) -> None:
     repo_libraries = Path(__file__).resolve().parents[2] / "third_party" / "threejs"
     installed_libraries = (
         Path(sysconfig.get_path("data")) / "share" / "openderm" / "third_party" / "threejs"
@@ -224,10 +289,16 @@ def export_surface_viewer_html(out_dir, frames, camera_rotations, camera_centers
     # this viewer is a desktop artifact). The full-res texture.jpg on disk is
     # untouched (that's the analysis artifact).
     tex_disk = cv2.imread(os.path.join(out_dir, "texture.jpg"), cv2.IMREAD_COLOR)
+    if tex_disk is None:
+        raise FileNotFoundError(os.path.join(out_dir, "texture.jpg"))
+    tex_disk = cast(NDArray[np.uint8], tex_disk)
     max_dim = 16384
     if max(tex_disk.shape[:2]) > max_dim:
         score = max_dim / max(tex_disk.shape[:2])
-        tex_disk = cv2.resize(tex_disk, None, fx=score, fy=score, interpolation=cv2.INTER_AREA)
+        resized_texture = cv2.resize(
+            cast(Any, tex_disk), None, fx=score, fy=score, interpolation=cv2.INTER_AREA
+        )
+        tex_disk = cast(NDArray[np.uint8], resized_texture)
         print(
             f"      (viewer texture downscaled to {tex_disk.shape[1]}x"
             f"{tex_disk.shape[0]} for WebGL; texture.jpg keeps full res)"

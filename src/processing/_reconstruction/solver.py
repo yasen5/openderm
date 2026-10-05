@@ -3,30 +3,125 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Protocol, Sequence, cast
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy.spatial.transform import Rotation
 
-from ..registration_export import build_surface_mesh
+from ..registration_features import Frame, Pair
 from ..registration_geometry import (
+    BundleAdjustmentResult,
+    CenterArray,
+    FloatArray,
+    IntArray,
+    RegistrationArgs,
+    RigModel,
+    RotationArray,
     bundle_adjust_camera_poses_and_feature_tracks,
     bundle_adjust_grouped_camera_poses_and_feature_tracks,
     compute_feature_track_reprojection_errors,
     triangulate_3d_feature_tracks,
 )
-from ..registration_surface import TexParam, align_frames_with_deformable_surface_warps, fit_surface_heightfield
-from ..registration_texture import estimate_camera_frame_texture_gains, render_surface_texture
+from ..registration_export import build_surface_mesh
+from ..registration_surface import (
+    Surface,
+    TexParam,
+    align_frames_with_deformable_surface_warps,
+    fit_surface_heightfield,
+)
+from ..registration_texture import Bounds, Warp, estimate_camera_frame_texture_gains, render_surface_texture
 
 
-def reconstruct_surface_from_camera_frames(args, problem):
+class ReconstructionArgs(RegistrationArgs, Protocol):
+    """Arguments consumed by the surface reconstruction stage."""
+
+    @property
+    def group_ba(self) -> str: ...
+
+    @property
+    def contour(self) -> str: ...
+
+    @property
+    def deformable_order(self) -> int: ...
+
+    @property
+    def lf_gain(self) -> str: ...
+
+    @property
+    def blend(self) -> str: ...
+
+    @property
+    def device(self) -> str: ...
+
+    @property
+    def mesh_smooth(self) -> Sequence[float]: ...
+
+    group_by_row: bool
+    reject_pose_mm: float
+    reject_rot_deg: float
+    surface_pitch: float
+    surface_smooth: float
+    contour_rx_thresh_deg: float
+    contour_rms_thresh: float
+    contour_smooth: float
+    deformable: bool
+    deformable_reg: float
+    texture_ppmm: float
+    blend_sharpness: float
+    focus_weight: float
+    hf_coherence_mm: float
+    hf_cross_group: bool
+    group_feather_mm: float
+    max_incidence_deg: float
+    mesh_pitch: float
+
+
+class ReconstructionProblem(Protocol):
+    out_dir: str
+    frames: list[Frame]
+    pairs: list[Pair]
+    rig_model: RigModel
+    R0: RotationArray
+    C0: CenterArray
+
+
+class ReconstructionSolution(Protocol):
+    """Attributes shared with the reconstruction artifact exporter."""
+
+    bundle_adjustment_result: BundleAdjustmentResult
+    R: RotationArray
+    C: CenterArray
+    X: FloatArray
+    dt: FloatArray
+    dr: FloatArray
+    med_err: FloatArray
+    surf: Surface
+    surf_rms: float
+    texture_parameters: TexParam
+    tex: NDArray[np.uint8]
+    wacc: NDArray[np.float32] | None
+    tex_bounds: Bounds
+    pos: NDArray[np.float32]
+    nrm: NDArray[np.float32]
+    uvn: NDArray[np.float32]
+    faces: NDArray[np.int64]
+    msg_settle: str
+    dzfit: float
+    so_rms: float
+
+
+def reconstruct_surface_from_camera_frames(
+    args: ReconstructionArgs, problem: ReconstructionProblem
+) -> ReconstructionSolution:
     """Run bundle adjustment, reject outliers, fit the surface, and render."""
     output_directory = problem.out_dir
     frames = problem.frames
     pairs = problem.pairs
-    rig_model = problem.mdl
+    rig_model = problem.rig_model
     prior_camera_rotations = problem.R0
     prior_camera_centers = problem.C0
-    frame_group = None
+    frame_group: dict[int, int] | None = None
     if args.group_by_row:
         # group by (row, y-sweep phase), not row alone: a contour scan's -y
         # return pass revisits the row minutes later (breathing moved the subject),
@@ -54,12 +149,14 @@ def reconstruct_surface_from_camera_frames(args, problem):
         # ownership/LF gates, which don't need per-group pose solves
         print("[6/9] 3D bundle adjustment (alternating triangulate_3d_feature_tracks/resect)")
         bundle_adjustment_result = bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, prior_camera_rotations, prior_camera_centers, args)
-    camera_rotations, camera_centers, landmark_points = bundle_adjustment_result["R"], bundle_adjustment_result["C"], bundle_adjustment_result["X"]
+    camera_rotations: RotationArray = bundle_adjustment_result["R"]
+    camera_centers: CenterArray = bundle_adjustment_result["C"]
+    landmark_points: FloatArray = bundle_adjustment_result["X"]
 
     # pose deviation from the (re-anchored) proprioception prior
     prior_camera_rotations, prior_camera_centers = rig_model.poses(frames)
-    position_deviations_mm = np.linalg.norm(camera_centers - prior_camera_centers, axis=1)
-    rotation_deviations_deg = np.array(
+    position_deviations_mm: FloatArray = np.linalg.norm(camera_centers - prior_camera_centers, axis=1)
+    rotation_deviations_deg: FloatArray = np.array(
         [
             np.degrees(np.linalg.norm(Rotation.from_matrix(prior_camera_rotations[index].T @ camera_rotations[index]).as_rotvec()))
             for index in range(len(frames))
@@ -80,25 +177,26 @@ def reconstruct_surface_from_camera_frames(args, problem):
     # otherwise a couple of bad frames bend the subject surface into a spike
     # and smear the ortho-texture.
     if args.reject_pose_mm > 0 or args.reject_rot_deg > 0:
-        outlier_frame_mask = np.zeros(len(frames), bool)
+        outlier_frame_mask: NDArray[np.bool_] = np.zeros(len(frames), bool)
         if args.reject_pose_mm > 0:
             outlier_frame_mask |= position_deviations_mm > args.reject_pose_mm
         if args.reject_rot_deg > 0:
             outlier_frame_mask |= rotation_deviations_deg > args.reject_rot_deg
         if outlier_frame_mask.any():
-            outlier_frame_indices = np.where(outlier_frame_mask)[0]
+            outlier_frame_indices: IntArray = np.where(outlier_frame_mask)[0].astype(np.int32)
             for index in outlier_frame_indices:
                 camera_rotations[index], camera_centers[index] = prior_camera_rotations[index].copy(), prior_camera_centers[index].copy()  # trust the gantry
-            outlier_frame_index_set = set(int(index) for index in outlier_frame_indices)
-            retained_observation_mask = np.array([int(observation_frame_index) not in outlier_frame_index_set for observation_frame_index in bundle_adjustment_result["obs_frame"]], dtype=bool)
-            for item_index in ("obs_frame", "obs_uv", "obs_track"):
-                bundle_adjustment_result[item_index] = bundle_adjustment_result[item_index][retained_observation_mask]
+            outlier_frame_index_set: set[int] = set(int(index) for index in outlier_frame_indices)
+            retained_observation_mask: NDArray[np.bool_] = np.array([int(observation_frame_index) not in outlier_frame_index_set for observation_frame_index in bundle_adjustment_result["obs_frame"]], dtype=bool)
+            bundle_adjustment_result["obs_frame"] = bundle_adjustment_result["obs_frame"][retained_observation_mask]
+            bundle_adjustment_result["obs_uv"] = bundle_adjustment_result["obs_uv"][retained_observation_mask]
+            bundle_adjustment_result["obs_track"] = bundle_adjustment_result["obs_track"][retained_observation_mask]
             # re-triangulate_3d_feature_tracks landmarks that still have >=2 trustworthy views;
             # keep the old position for the rest (they are dropped later by the
             # >=3-obs surface-fit gate, but must stay finite for the bounds calc).
-            retriangulated_landmark_points = triangulate_3d_feature_tracks(bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], bundle_adjustment_result["obs_track"], len(landmark_points), camera_rotations, camera_centers, rig_model)
-            observation_count_by_landmark = np.bincount(bundle_adjustment_result["obs_track"], minlength=len(landmark_points))
-            landmark_retriangulation_valid = (observation_count_by_landmark >= 2) & np.isfinite(retriangulated_landmark_points).all(1)
+            retriangulated_landmark_points: FloatArray = triangulate_3d_feature_tracks(bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], bundle_adjustment_result["obs_track"], len(landmark_points), camera_rotations, camera_centers, rig_model)
+            observation_count_by_landmark: NDArray[np.int64] = np.bincount(bundle_adjustment_result["obs_track"], minlength=len(landmark_points))
+            landmark_retriangulation_valid: NDArray[np.bool_] = (observation_count_by_landmark >= 2) & np.isfinite(retriangulated_landmark_points).all(1)
             landmark_points = np.where(landmark_retriangulation_valid[:, None], retriangulated_landmark_points, landmark_points)
             bundle_adjustment_result["X"] = landmark_points
             print(
@@ -111,24 +209,24 @@ def reconstruct_surface_from_camera_frames(args, problem):
 
     # standoff sensor agreement
     reprojection_errors, camera_depths = compute_feature_track_reprojection_errors(landmark_points, bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], bundle_adjustment_result["obs_track"], camera_rotations, camera_centers, rig_model)
-    median_depth_by_frame = np.full(len(frames), np.nan)
+    median_depth_by_frame: FloatArray = np.full(len(frames), np.nan)
     for frame in frames:
         mask = bundle_adjustment_result["obs_frame"] == frame.idx
         if mask.sum() > 10:
             median_depth_by_frame[frame.idx] = np.median(camera_depths[mask])
-    standoff_readings = np.array([frame.standoff for frame in frames])
-    landmark_retriangulation_valid = ~np.isnan(median_depth_by_frame)
+    standoff_readings: FloatArray = np.array([frame.standoff for frame in frames])
+    landmark_retriangulation_valid: NDArray[np.bool_] = ~np.isnan(median_depth_by_frame)
     standoff_depth_offset = float(np.median(median_depth_by_frame[landmark_retriangulation_valid] - standoff_readings[landmark_retriangulation_valid]))
     standoff_depth_rmse = float(np.sqrt(np.mean((median_depth_by_frame[landmark_retriangulation_valid] - standoff_readings[landmark_retriangulation_valid] - standoff_depth_offset) ** 2)))
     print(f"      standoff sensors vs recovered depth: offset {standoff_depth_offset:+.1f}mm, rms {standoff_depth_rmse:.2f}mm")
 
     # settled vs unsettled
-    median_reprojection_error_by_frame = np.full(len(frames), np.nan)
+    median_reprojection_error_by_frame: FloatArray = np.full(len(frames), np.nan)
     for frame in frames:
         mask = bundle_adjustment_result["obs_frame"] == frame.idx
         if mask.sum():
             median_reprojection_error_by_frame[frame.idx] = np.median(reprojection_errors[mask])
-    settled = np.array([frame.settled for frame in frames])
+    settled: NDArray[np.bool_] = np.array([frame.settled for frame in frames])
     msg_settle = ""
     if settled.any() and (~settled).any():
         settled_median_error = np.nanmedian(median_reprojection_error_by_frame[settled])
@@ -143,19 +241,19 @@ def reconstruct_surface_from_camera_frames(args, problem):
     # to follow the surface has a wide RX spread. Surface RMS provides an
     # independent confirmation. The gate only changes surface smoothing, so the
     # bounds and landmark selection remain identical.
-    frame_x_rotation_angles = np.array([frame.rx for frame in frames])
+    frame_x_rotation_angles: FloatArray = np.array([frame.rx for frame in frames])
     frame_x_rotation_spread_deg = float(np.degrees(frame_x_rotation_angles.max() - frame_x_rotation_angles.min()))
     # robust bounds + well-supported landmarks only: a handful of blown-up
     # tracks must not inflate the grid (oscillating extrapolation wrecks the
     # arc-length parameterisation downstream)
-    landmark_x_percentiles = np.percentile(landmark_points[:, 0], [0.5, 99.5])
-    landmark_y_percentiles = np.percentile(landmark_points[:, 1], [0.5, 99.5])
+    landmark_x_percentiles: FloatArray = np.percentile(landmark_points[:, 0], [0.5, 99.5])
+    landmark_y_percentiles: FloatArray = np.percentile(landmark_points[:, 1], [0.5, 99.5])
     landmark_x_min, landmark_x_max = landmark_x_percentiles[0] - 8, landmark_x_percentiles[1] + 8
     landmark_y_min, landmark_y_max = landmark_y_percentiles[0] - 8, landmark_y_percentiles[1] + 8
-    observation_count_by_landmark = np.bincount(bundle_adjustment_result["obs_track"], minlength=len(landmark_points))
-    landmark_surface_fit_weights = np.clip(observation_count_by_landmark - 1, 1, 8).astype(float)
-    surface_fit_landmark_mask = (landmark_points[:, 0] >= landmark_x_min) & (landmark_points[:, 0] <= landmark_x_max) & (landmark_points[:, 1] >= landmark_y_min) & (landmark_points[:, 1] <= landmark_y_max)
-    well_observed_landmark_mask = observation_count_by_landmark >= 3
+    observation_count_by_landmark: NDArray[np.int64] = np.bincount(bundle_adjustment_result["obs_track"], minlength=len(landmark_points))
+    landmark_surface_fit_weights: FloatArray = np.clip(observation_count_by_landmark - 1, 1, 8).astype(float)
+    surface_fit_landmark_mask: NDArray[np.bool_] = (landmark_points[:, 0] >= landmark_x_min) & (landmark_points[:, 0] <= landmark_x_max) & (landmark_points[:, 1] >= landmark_y_min) & (landmark_points[:, 1] <= landmark_y_max)
+    well_observed_landmark_mask: NDArray[np.bool_] = observation_count_by_landmark >= 3
     if (surface_fit_landmark_mask & well_observed_landmark_mask).mean() > 0.3:
         surface_fit_landmark_mask &= well_observed_landmark_mask
     print(
@@ -163,6 +261,7 @@ def reconstruct_surface_from_camera_frames(args, problem):
         f"(robust bounds x[{landmark_x_min:.0f},{landmark_x_max:.0f}] y[{landmark_y_min:.0f},{landmark_y_max:.0f}], "
         f">=3-obs tracks)"
     )
+    fitted_surface: Surface
     fitted_surface, surface_fit_rms = fit_surface_heightfield(
         landmark_points[surface_fit_landmark_mask], (landmark_x_min, landmark_x_max, landmark_y_min, landmark_y_max), args.surface_pitch, args.surface_smooth, initial_landmark_weights=landmark_surface_fit_weights[surface_fit_landmark_mask]
     )
@@ -186,14 +285,14 @@ def reconstruct_surface_from_camera_frames(args, problem):
         )
     texture_parameters = TexParam(fitted_surface, rig_model.base_R, rig_model.base_t)
 
-    frame_deformation_warps = None
+    frame_deformation_warps: Warp = None
     if args.deformable:
         print("      deformable alignment (smooth per-frame map warp)")
         frame_deformation_warps = align_frames_with_deformable_surface_warps(
             frames, pairs, camera_rotations, camera_centers, rig_model, fitted_surface, texture_parameters, reg=args.deformable_reg, order=args.deformable_order
         )
 
-    frame_texture_gains = None
+    frame_texture_gains: NDArray[np.float32] | None = None
     if args.lf_gain != "off":
         frame_texture_gains = estimate_camera_frame_texture_gains(
             frames,
@@ -206,6 +305,9 @@ def reconstruct_surface_from_camera_frames(args, problem):
         )
 
     print("[8/9] rendering ortho-texture")
+    rendered_texture: NDArray[np.uint8]
+    texture_accumulation_weights: NDArray[np.float32] | None
+    texture_bounds: Bounds
     rendered_texture, texture_accumulation_weights, texture_bounds = render_surface_texture(
         frames,
         camera_rotations,
@@ -228,6 +330,12 @@ def reconstruct_surface_from_camera_frames(args, problem):
         device=args.device,
         frame_gain=frame_texture_gains,
     )
+    if texture_accumulation_weights is None:
+        raise RuntimeError("Texture renderer did not return accumulation weights")
+    pos: NDArray[np.float32]
+    nrm: NDArray[np.float32]
+    uvn: NDArray[np.float32]
+    faces: NDArray[np.int64]
     pos, nrm, uvn, faces = build_surface_mesh(
         fitted_surface,
         texture_parameters,
@@ -236,9 +344,9 @@ def reconstruct_surface_from_camera_frames(args, problem):
         args.texture_ppmm,
         args.mesh_pitch,
         surface_normal_sign,
-        tuple(args.mesh_smooth),
+        (args.mesh_smooth[0], args.mesh_smooth[1]),
     )
-    return SimpleNamespace(
+    return cast(ReconstructionSolution, SimpleNamespace(
         bundle_adjustment_result=bundle_adjustment_result,
         R=camera_rotations,
         C=camera_centers,
@@ -259,4 +367,4 @@ def reconstruct_surface_from_camera_frames(args, problem):
         msg_settle=msg_settle,
         dzfit=standoff_depth_offset,
         so_rms=standoff_depth_rmse,
-    )
+    ))

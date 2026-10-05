@@ -2,27 +2,43 @@
 
 from __future__ import annotations
 
+from typing import Callable, cast
+
 import numpy as np
+from numpy.typing import NDArray
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
+from .registration_features import Frame, Pair
+from .registration_geometry import RigModel
 from .registration_geometry import undistort_image_points_to_normalized_camera
+
+FloatArray = NDArray[np.float64]
+BoolArray = NDArray[np.bool_]
 
 
 # ----------------------------------------------------------------------------
 # surface heightfield fit  z = f(x, y)
 # ----------------------------------------------------------------------------
 class Surface:
-    def __init__(self, xs, ys, zgrid, support=None):
+    def __init__(
+        self,
+        xs: FloatArray,
+        ys: FloatArray,
+        zgrid: FloatArray,
+        support: BoolArray | None = None,
+    ) -> None:
         self.xs, self.ys, self.z = xs, ys, zgrid
         hs_x = xs[1] - xs[0]
         hs_y = ys[1] - ys[0]
-        self.gy, self.gx = np.gradient(zgrid, hs_y, hs_x)
+        self.gy, self.gx = cast(
+            tuple[FloatArray, FloatArray], np.gradient(zgrid, hs_y, hs_x)
+        )
         # bool grid: where the heightfield is supported by landmarks (vs
         # extrapolated). Texturing is restricted to this region.
         self.support = support if support is not None else np.ones_like(zgrid, bool)
 
-    def _interp(self, grid, surface_x, surface_y):
+    def _interp(self, grid: FloatArray, surface_x: FloatArray, surface_y: FloatArray) -> FloatArray:
         xi = np.clip((surface_x - self.xs[0]) / (self.xs[1] - self.xs[0]), 0, len(self.xs) - 1.001)
         yi = np.clip((surface_y - self.ys[0]) / (self.ys[1] - self.ys[0]), 0, len(self.ys) - 1.001)
         x0 = np.floor(xi).astype(int)
@@ -34,18 +50,18 @@ class Surface:
             gauge[y0 + 1, x0] * (1 - fx_) + gauge[y0 + 1, x0 + 1] * fx_
         ) * fy_
 
-    def height(self, surface_x, surface_y):
+    def height(self, surface_x: FloatArray, surface_y: FloatArray) -> FloatArray:
         return self._interp(self.z, surface_x, surface_y)
 
-    def grad(self, surface_x, surface_y):
+    def grad(self, surface_x: FloatArray, surface_y: FloatArray) -> tuple[FloatArray, FloatArray]:
         return self._interp(self.gx, surface_x, surface_y), self._interp(self.gy, surface_x, surface_y)
 
-    def normal(self, surface_x, surface_y, up_sign=1.0):
+    def normal(self, surface_x: FloatArray, surface_y: FloatArray, up_sign: float = 1.0) -> FloatArray:
         gx, gy = self.grad(surface_x, surface_y)
         item_count = np.stack([-gx, -gy, np.ones_like(gx)], axis=-1) * up_sign
         return item_count / np.linalg.norm(item_count, axis=-1, keepdims=True)
 
-    def supported(self, surface_x, surface_y):
+    def supported(self, surface_x: FloatArray, surface_y: FloatArray) -> BoolArray:
         xi = np.clip(
             np.round((surface_x - self.xs[0]) / (self.xs[1] - self.xs[0])).astype(int), 0, len(self.xs) - 1
         )
@@ -56,19 +72,19 @@ class Surface:
 
 
 def fit_surface_heightfield(
-    landmark_points,
-    surface_bounds=None,
-    grid_pitch_mm=None,
-    smoothness_weight=None,
-    robust_fit_iteration_count=3,
-    initial_landmark_weights=None,
-    **legacy_options,
-):
-    surface_bounds = legacy_options.pop("bounds", surface_bounds)
-    grid_pitch_mm = legacy_options.pop("pitch", grid_pitch_mm)
-    smoothness_weight = legacy_options.pop("smooth", smoothness_weight)
-    robust_fit_iteration_count = legacy_options.pop("robust_iters", robust_fit_iteration_count)
-    initial_landmark_weights = legacy_options.pop("w0", initial_landmark_weights)
+    landmark_points: FloatArray,
+    surface_bounds: tuple[float, float, float, float] | None = None,
+    grid_pitch_mm: float | None = None,
+    smoothness_weight: float | None = None,
+    robust_fit_iteration_count: int = 3,
+    initial_landmark_weights: FloatArray | None = None,
+    **legacy_options: object,
+) -> tuple[Surface, float]:
+    surface_bounds = cast(tuple[float, float, float, float] | None, legacy_options.pop("bounds", surface_bounds))
+    grid_pitch_mm = cast(float | None, legacy_options.pop("pitch", grid_pitch_mm))
+    smoothness_weight = cast(float | None, legacy_options.pop("smooth", smoothness_weight))
+    robust_fit_iteration_count = cast(int, legacy_options.pop("robust_iters", robust_fit_iteration_count))
+    initial_landmark_weights = cast(FloatArray | None, legacy_options.pop("w0", initial_landmark_weights))
     if legacy_options:
         unexpected_option = next(iter(legacy_options))
         raise TypeError(f"fit_surface_heightfield got an unexpected keyword argument {unexpected_option!r}")
@@ -104,8 +120,12 @@ def fit_surface_heightfield(
     ).tocsr()
 
     # second-difference smoothness in x and y
-    def second_diff(n_outer, n_inner, stride_outer, stride_inner):
-        row_indices, column_indices, second_difference_values = [], [], []
+    def second_diff(
+        n_outer: int, n_inner: int, stride_outer: int, stride_inner: int
+    ) -> sp.csr_array:
+        row_indices: list[int] = []
+        column_indices: list[int] = []
+        second_difference_values: list[float] = []
         constraint_index = 0
         for outer_index in range(n_outer):
             for inner_index in range(1, n_inner - 1):
@@ -131,7 +151,7 @@ def fit_surface_heightfield(
     base_landmark_weights = np.ones(len(landmark_points)) if initial_landmark_weights is None else np.asarray(initial_landmark_weights, float)
     robust_weights = base_landmark_weights.copy()
     landmark_heights = landmark_points[:, 2]
-    surface_heights = None
+    surface_heights: FloatArray | None = None
     for robust_fit_iteration in range(robust_fit_iteration_count):
         observation_weight_matrix = sp.diags(robust_weights)
         normal_matrix = (
@@ -141,7 +161,7 @@ def fit_surface_heightfield(
             + regularization_matrix
         ).tocsc()
         normal_rhs = landmark_interpolation_matrix.T @ (robust_weights * landmark_heights)
-        surface_heights = spla.spsolve(normal_matrix, normal_rhs)
+        surface_heights = np.asarray(spla.spsolve(normal_matrix, normal_rhs), dtype=np.float64)
         landmark_height_residuals = landmark_interpolation_matrix @ surface_heights - landmark_heights
         sigma = 1.4826 * np.median(
             np.abs(landmark_height_residuals - np.median(landmark_height_residuals))
@@ -152,6 +172,7 @@ def fit_surface_heightfield(
             2.0 * sigma / np.abs(landmark_height_residuals),
         )
         robust_weights[np.abs(landmark_height_residuals) > 6 * sigma] = 0.0
+    assert surface_heights is not None
     landmark_height_residuals = landmark_interpolation_matrix @ surface_heights - landmark_heights
     inlier_mask = np.abs(landmark_height_residuals) < 6 * (
         1.4826 * np.median(np.abs(landmark_height_residuals - np.median(landmark_height_residuals))) + 1e-9
@@ -164,10 +185,21 @@ def fit_surface_heightfield(
     # support mask: nodes touched by an inlier landmark, dilated ~6mm
     from scipy.ndimage import binary_dilation
 
-    touched = np.zeros(surface_grid_node_count, bool)
+    touched: BoolArray = np.zeros(surface_grid_node_count, bool)
     touched[interpolation_column_indices.reshape(-1, 4)[inlier_mask].ravel()] = True
-    surface_support_mask = binary_dilation(touched.reshape(surface_y_node_count, surface_x_node_count), iterations=max(1, int(round(6.0 / grid_pitch_mm))))
-    return Surface(surface_x_grid, surface_y_grid, surface_heights.reshape(surface_y_node_count, surface_x_node_count), support=surface_support_mask), surface_fit_rms
+    surface_support_mask = cast(
+        BoolArray,
+        binary_dilation(
+            touched.reshape(surface_y_node_count, surface_x_node_count),
+            iterations=max(1, int(round(6.0 / grid_pitch_mm))),
+        ),
+    )
+    return Surface(
+        surface_x_grid,
+        surface_y_grid,
+        surface_heights.reshape(surface_y_node_count, surface_x_node_count),
+        support=surface_support_mask,
+    ), surface_fit_rms
 
 
 # ----------------------------------------------------------------------------
@@ -180,7 +212,12 @@ class TexParam:
     across scans -- the stable parameterisation longitudinal lesion tracking needs
     (the per-scan world gauge is removed). base_R=None falls back to world x/y."""
 
-    def __init__(self, surf: Surface, base_R=None, base_t=None):
+    def __init__(
+        self,
+        surf: Surface,
+        base_R: FloatArray | None = None,
+        base_t: FloatArray | None = None,
+    ) -> None:
         self.surf = surf
         self.bR = np.eye(3) if base_R is None else np.asarray(base_R)
         self.bt = np.zeros(3) if base_t is None else np.asarray(base_t)
@@ -204,12 +241,12 @@ class TexParam:
         self.gy = ctr
         self.s = np.concatenate([[0], np.cumsum((ds[1:] + ds[:-1]) * 0.5 * dy)])
 
-    def to_uv(self, surface_x, surface_y):
+    def to_uv(self, surface_x: FloatArray, surface_y: FloatArray) -> tuple[FloatArray, FloatArray]:
         world_z = self.surf.height(surface_x, surface_y)
         Pg = (np.stack([surface_x, surface_y, world_z], -1) - self.bt) @ self.bR
         return Pg[..., 0], np.interp(Pg[..., 1], self.gy, self.s)
 
-    def to_xy(self, texture_u, texture_v):
+    def to_xy(self, texture_u: FloatArray, texture_v: FloatArray) -> tuple[FloatArray, FloatArray]:
         gy = np.interp(texture_v, self.s, self.gy)
         # invert the (near-identity) world<->gantry map by Newton: find world
         # (x,y) whose surface point transforms to gantry (u, gy)
@@ -222,7 +259,9 @@ class TexParam:
         return surface_x, surface_y
 
 
-def ray_surface_intersect(Cw, dirs, surf: Surface, t0, iters=8):
+def ray_surface_intersect(
+    Cw: FloatArray, dirs: FloatArray, surf: Surface, t0: float, iters: int = 8
+) -> FloatArray:
     """Intersect rays (origin Cw, unit dirs (N,3)) with the heightfield."""
     threshold = np.full(len(dirs), float(t0))
     for iteration_index in range(iters):
@@ -237,7 +276,14 @@ def ray_surface_intersect(Cw, dirs, surf: Surface, t0, iters=8):
     return Cw + dirs * threshold[:, None]
 
 
-def compute_camera_frame_surface_footprint(frame, camera_rotations, camera_centers, rig_model, surf, n_edge=6):
+def compute_camera_frame_surface_footprint(
+    frame: Frame,
+    camera_rotations: FloatArray,
+    camera_centers: FloatArray,
+    rig_model: RigModel,
+    surf: Surface,
+    n_edge: int = 6,
+) -> FloatArray:
     """Footprint polygon on the surface (world pts), sampled along edges."""
     weight, image_height = rig_model.cx * 2, rig_model.cy * 2
     ts = np.linspace(0, 1, n_edge, endpoint=False)
@@ -258,8 +304,17 @@ def compute_camera_frame_surface_footprint(frame, camera_rotations, camera_cente
 # deformable alignment (breathing): smooth per-frame warp in the unwrapped map
 # ----------------------------------------------------------------------------
 def align_frames_with_deformable_surface_warps(
-    frames, pairs, camera_rotations, camera_centers, rig_model, surf, texture_parameters, reg=2.0, max_per_pair=200, order=1
-):
+    frames: list[Frame],
+    pairs: list[Pair],
+    camera_rotations: FloatArray,
+    camera_centers: FloatArray,
+    rig_model: RigModel,
+    surf: Surface,
+    texture_parameters: TexParam,
+    reg: float = 2.0,
+    max_per_pair: int = 200,
+    order: int = 1,
+) -> tuple[FloatArray, FloatArray, float, float] | None:
     """Remove the residual breathing misalignment that makes stitch seams cross
     moles. Each overlapping pair gives feature correspondences that the rigid
     registration places at slightly different (u,v) on the unwrapped map (the
@@ -275,7 +330,7 @@ def align_frames_with_deformable_surface_warps(
 
     item_count = len(frames)
 
-    def to_uv(pts, fi):
+    def to_uv(pts: FloatArray | NDArray[np.float32], fi: int) -> FloatArray:
         xu = undistort_image_points_to_normalized_camera(pts.astype(float), rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy)
         dcam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
         dw = dcam @ camera_rotations[fi].T
@@ -284,14 +339,21 @@ def align_frames_with_deformable_surface_warps(
         return np.stack(texture_parameters.to_uv(points[:, 0], points[:, 1]), 1)
 
     # collect correspondences in map (u,v); centre for conditioning
-    corr = []
+    corr: list[tuple[int, FloatArray, int, FloatArray]] = []
     rng = np.random.default_rng(0)
     for point in pairs:
         mask = len(point.src)
         if mask == 0:
             continue
         sel = rng.permutation(mask)[:max_per_pair]
-        corr.append((point.i, to_uv(point.src[sel], point.i), point.j, to_uv(point.dst[sel], point.j)))
+        corr.append(
+            (
+                point.index,
+                to_uv(point.src[sel], point.index),
+                point.neighbor_index,
+                to_uv(point.dst[sel], point.neighbor_index),
+            )
+        )
     if not corr:
         return None
     allu = np.concatenate([candidate[1] for candidate in corr] + [candidate[3] for candidate in corr])
@@ -299,7 +361,7 @@ def align_frames_with_deformable_surface_warps(
 
     nb = 3 if order == 1 else 6
 
-    def basis(du, dv):
+    def basis(du: float, dv: float) -> list[float]:
         surface_warp_basis = [du, dv, 1.0]
         if nb == 6:
             # quadratic terms scaled to linear-column magnitude (mm^2/50)
@@ -307,7 +369,11 @@ def align_frames_with_deformable_surface_warps(
             surface_warp_basis += [du * du / 50.0, du * dv / 50.0, dv * dv / 50.0]
         return surface_warp_basis
 
-    II, JJ, VV, bu, bv = [], [], [], [], []
+    II: list[int] = []
+    JJ: list[int] = []
+    VV: list[float] = []
+    bu: list[float] = []
+    bv: list[float] = []
     row = 0
     for fi, Ui, fj, Uj in corr:
         for item_index in range(len(Ui)):
@@ -337,10 +403,11 @@ def align_frames_with_deformable_surface_warps(
             row += 1
 
     points_a = sp.coo_matrix((VV, (II, JJ)), shape=(row, nb * item_count)).tocsr()
-    bu = np.array(bu)
-    bv = np.array(bv)
-    Mu = spla.lsqr(points_a, bu)[0].reshape(item_count, nb)
-    Mv = spla.lsqr(points_a, bv)[0].reshape(item_count, nb)
+    bu_array = np.asarray(bu, dtype=np.float64)
+    bv_array = np.asarray(bv, dtype=np.float64)
+    lsqr = cast(Callable[..., tuple[FloatArray, object, object, object, object, object, object, object, object, object]], spla.lsqr)
+    Mu = lsqr(points_a, bu_array)[0].reshape(item_count, nb)
+    Mv = lsqr(points_a, bv_array)[0].reshape(item_count, nb)
     # runaway guard: a per-frame "breathing" correction of tens of mm is
     # never physical -- it means the frame's few (usually grazing-flank,
     # one-sided) correspondences conflict with its BA pose, and warping its
@@ -360,9 +427,9 @@ def align_frames_with_deformable_surface_warps(
         mag = np.hypot(Mu[:, 2], Mv[:, 2])
     # report correction magnitude + how much pair disagreement the warp
     # removed: the POST residual is what still cuts hairs at HF-winner seams
-    pre = np.hypot(bu[:ndata], bv[:ndata])
+    pre = np.hypot(bu_array[:ndata], bv_array[:ndata])
     Ad = points_a[:ndata]
-    post = np.hypot(Ad @ Mu.ravel() - bu[:ndata], Ad @ Mv.ravel() - bv[:ndata])
+    post = np.hypot(Ad @ Mu.ravel() - bu_array[:ndata], Ad @ Mv.ravel() - bv_array[:ndata])
     print(
         f"      deformable align (order {order}): {row} eqns, "
         f"|centre shift| median {np.median(mag):.2f} max {mag.max():.2f} mm; "

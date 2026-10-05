@@ -8,21 +8,86 @@ import os
 import pickle
 import sys
 import time
-from types import SimpleNamespace
+from dataclasses import dataclass
+from typing import Protocol, TypedDict, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .. import registration_features
-from ..registration_features import extract_camera_frame_sift_keypoints, load_scan_camera_frames, match_camera_frame_pair_keypoints, configure_gpu_feature_matcher
+from ..registration_features import (
+    Frame,
+    Pair,
+    _KPt,
+    extract_camera_frame_sift_keypoints,
+    load_scan_camera_frames,
+    match_camera_frame_pair_keypoints,
+    configure_gpu_feature_matcher,
+)
 from ..registration_geometry import (
     RigModel,
     find_overlapping_frame_pairs,
     predict_frame_pair_translation,
     estimate_initial_rig_camera_model,
 )
+from .parser import ScanCliArguments
 
 
-def build_scan_reconstruction_problem(args, mem_cap=None):
+class _CacheKey(TypedDict):
+    version: int
+    downscale: int
+    nfeatures: int
+    ratio: float
+    min_inliers: int
+    overlap_frac: float
+    max_partners: int
+    n: int
+    src: str
+    stations: tuple[int, ...]
+
+
+class _PairCache(TypedDict):
+    key: _CacheKey
+    cpairs: list[Pair]
+    xpairs: list[Pair]
+    pairs: list[Pair]
+    shape: tuple[int, int]
+    kps: list[list[tuple[float, float]]]
+
+
+class _RigModelJson(TypedDict):
+    fx_fullres_px: float
+    k1: float
+    rx_sign: float
+    lever_mm: list[float]
+    Rm: list[list[float]]
+    dz0_mm: float
+    base_R: list[list[float]]
+    base_t: list[float]
+
+
+class _RigDocument(TypedDict):
+    rig_model: _RigModelJson
+
+
+class _ClearableGpuMatcher(Protocol):
+    def clear(self) -> None: ...
+
+
+@dataclass
+class ReconstructionProblem:
+    out_dir: str
+    frames: list[Frame]
+    pairs: list[Pair]
+    rig_model: RigModel
+    prefit_rms: float
+    R0: NDArray[np.float64]
+    C0: NDArray[np.float64]
+
+
+def build_scan_reconstruction_problem(
+    args: ScanCliArguments, mem_cap: int | None = None
+) -> ReconstructionProblem:
     """Load captures, match features, and establish the rig prior."""
     out_dir = args.out or os.path.join(args.capture_dir, "registration3d")
     os.makedirs(out_dir, exist_ok=True)
@@ -31,15 +96,17 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
             f"      RAM guard: data segment capped at {mem_cap / 1e9:.1f} GB "
             "(MemoryError here beats the kernel OOM killer there)"
         )
-    row_range = station_range = col_range = None
+    row_range: tuple[int, int] | None = None
+    station_range: tuple[int, int] | None = None
+    col_range: tuple[int, int] | None = None
     if args.rows:
-        lo, range_separator, hi = args.rows.partition(":")
+        lo, _, hi = args.rows.partition(":")
         row_range = (int(lo), int(hi or lo))
     if args.stations:
-        lo, range_separator, hi = args.stations.partition(":")
+        lo, _, hi = args.stations.partition(":")
         station_range = (int(lo), int(hi or lo))
     if args.cols:
-        lo, range_separator, hi = args.cols.partition(":")
+        lo, _, hi = args.cols.partition(":")
         col_range = (int(lo), int(hi or lo))
 
     print(f"[1/9] loading frames from {args.capture_dir}")
@@ -54,24 +121,24 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
 
     # Features and matches are computed in the sensor frame with EXIF
     # orientation ignored.
-    cache_key = dict(
-        version=3,
-        downscale=args.downscale,
-        nfeatures=args.nfeatures,
-        ratio=args.ratio,
-        min_inliers=args.min_inliers,
-        overlap_frac=args.overlap_frac,
-        max_partners=args.max_partners,
-        n=len(frames),
-        src="jpeg",
-        stations=tuple(frame.station for frame in frames),
-    )
+    cache_key: _CacheKey = {
+        "version": 3,
+        "downscale": args.downscale,
+        "nfeatures": args.nfeatures,
+        "ratio": args.ratio,
+        "min_inliers": args.min_inliers,
+        "overlap_frac": args.overlap_frac,
+        "max_partners": args.max_partners,
+        "n": len(frames),
+        "src": "jpeg",
+        "stations": tuple(frame.station for frame in frames),
+    }
     cache_path = os.path.join(out_dir, "cache_pairs.pkl")
-    cached = None
+    cached: _PairCache | None = None
     if not args.no_cache and os.path.exists(cache_path):
         try:
             with open(cache_path, "rb") as fh:
-                blob = pickle.load(fh)
+                blob = cast(_PairCache, pickle.load(fh))
             if blob["key"] == cache_key:
                 cached = blob
                 print("      (using cached matches)")
@@ -87,7 +154,9 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
             if _gm_ok():
                 configure_gpu_feature_matcher(GpuMatcher())
                 print("      descriptor matching: exact 2-NN on cuda (torch)")
-        h0, w0 = frames[0].shape
+        frame_shape = frames[0].shape
+        assert frame_shape is not None
+        h0, w0 = frame_shape
     else:
         h0, w0 = cached["shape"]
         for frame in frames:
@@ -96,7 +165,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
 
     if cached is None:
         print("[3/9] matching consecutive pairs")
-        cpairs = []
+        cpairs: list[Pair] = []
         for item_index in range(len(frames) - 1):
             point = match_camera_frame_pair_keypoints(frames[item_index], frames[item_index + 1], args.ratio, args.min_inliers)
             if point is None:
@@ -108,8 +177,8 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         # without which the rig-model pre-fit is rank-deficient (in-row pairs
         # only sample dx/dz/drx). Serpentine scan -> nearest gantry xy match.
         print("      matching cross-row pairs for the pre-fit")
-        xpairs = []
-        byrow: dict[int, list] = {}
+        xpairs: list[Pair] = []
+        byrow: dict[int, list[Frame]] = {}
         for frame in frames:
             byrow.setdefault(frame.row, []).append(frame)
         for camera_rotation in sorted(byrow):
@@ -127,7 +196,9 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
 
     if args.rig_from:
         print(f"[4/9] rig model loaded from {args.rig_from} (pre-fit skipped)")
-        rj = json.load(open(args.rig_from))["rig_model"]
+        with open(args.rig_from) as rig_file:
+            rig_document = cast(_RigDocument, json.load(rig_file))
+        rj = rig_document["rig_model"]
         rig_model = RigModel(
             fx=float(rj["fx_fullres_px"]) / args.downscale,
             k1=float(rj["k1"]),
@@ -145,7 +216,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
     else:
         print("[4/9] rig-model pre-fit (fx seed, lever arm, mount, rx sign)")
         # rough fx init: median consecutive-pair shift per 10mm gantry step at Z~110
-        ts = np.array([[point.tx, point.ty] for point in cpairs])
+        ts: NDArray[np.float64] = np.array([[point.tx, point.ty] for point in cpairs])
         fx0 = float(np.median(np.linalg.norm(ts, axis=1)) / 10.0 * 110.0)
         rig_model, prefit_rms = estimate_initial_rig_camera_model(frames, cpairs + xpairs, w0, h0, args.downscale, fx0)
     if args.fx_full:
@@ -171,11 +242,14 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         keep, overlaps = find_overlapping_frame_pairs(
             rig_model, frames, R0, C0, args.overlap_frac, args.max_partners
         )
-        existing = {(point.i, point.j) for point in cpairs} | {(point.i, point.j) for point in xpairs}
+        existing: set[tuple[int, int]] = {
+            (point.i, point.j) for point in cpairs
+        } | {(point.i, point.j) for point in xpairs}
         to_match = sorted(ij for ij in keep if ij not in existing)
         print(f"      {len(overlaps)} candidate pairs -> matching {len(to_match)} extra")
-        pairs = list(cpairs) + list(xpairs)
-        added = rejected = 0
+        pairs: list[Pair] = list(cpairs) + list(xpairs)
+        added = 0
+        rejected = 0
         t0 = time.time()
         for n_, (index, neighbor_index) in enumerate(to_match):
             tpred = predict_frame_pair_translation(rig_model, frames, R0, C0, index, neighbor_index)
@@ -206,7 +280,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
                         xpairs=xpairs,
                         pairs=pairs,
                         shape=(h0, w0),
-                        kps=[[kp.pt for kp in frame.kp] for frame in frames],
+                        kps=[[kp.pt for kp in (frame.kp or [])] for frame in frames],
                     ),
                     fh,
                 )
@@ -214,12 +288,13 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         pairs = cached["pairs"]
         # rebuild minimal kp lists for track building
         for frame, kps in zip(frames, cached["kps"]):
-            frame.kp = [registration_features._KPt(tuple(point)) for point in kps]
+            frame.kp = [_KPt((float(point[0]), float(point[1]))) for point in kps]
 
     if registration_features._GPU_MATCHER is not None:
-        registration_features._GPU_MATCHER.clear()  # free descriptor VRAM before render
+        cast(_ClearableGpuMatcher, registration_features._GPU_MATCHER).clear()
+        # free descriptor VRAM before render
         configure_gpu_feature_matcher(None)
-    return SimpleNamespace(
+    return ReconstructionProblem(
         out_dir=out_dir,
         frames=frames,
         pairs=pairs,
