@@ -22,18 +22,18 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
     out_dir = problem.out_dir
     frames = problem.frames
     pairs = problem.pairs
-    mdl = problem.mdl
+    rig_model = problem.mdl
     prefit_rms = problem.prefit_rms
-    ba = solution.ba
-    R = solution.R
-    C = solution.C
-    X = solution.X
+    bundle_adjustment_result = solution.ba
+    camera_rotations = solution.R
+    camera_centers = solution.C
+    landmark_points = solution.X
     dt = solution.dt
     dr = solution.dr
     med_err = solution.med_err
     surf = solution.surf
     surf_rms = solution.surf_rms
-    tp = solution.tp
+    texture_parameters = solution.tp
     tex = solution.tex
     wacc = solution.wacc
     tex_bounds = solution.tex_bounds
@@ -46,44 +46,44 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
     so_rms = solution.so_rms
     print("[9/9] writing outputs")
     export_surface_mesh_obj(out_dir, pos, nrm, uvn, faces)
-    export_surface_landmarks_ply(out_dir, X, ba["track_err"])
-    render_reconstruction_overview_png(out_dir, frames, R, C, mdl, surf, X)
+    export_surface_landmarks_ply(out_dir, landmark_points, bundle_adjustment_result["track_err"])
+    render_reconstruction_overview_png(out_dir, frames, camera_rotations, camera_centers, rig_model, surf, landmark_points)
 
-    rms_mm = ba["rms"] / (mdl.fx / np.mean([mdl.depth(f) for f in frames]))
+    rms_mm = bundle_adjustment_result["rms"] / (rig_model.fx / np.mean([rig_model.depth(frame) for frame in frames]))
     area_cm2 = (wacc > 0).sum() / (args.texture_ppmm**2) / 100.0
     stats = dict(
         capture=os.path.basename(os.path.normpath(args.capture_dir)),
         n_frames=len(frames),
-        n_landmarks=int(len(X)),
-        rms_px=f"{ba['rms']:.2f}",
+        n_landmarks=int(len(landmark_points)),
+        rms_px=f"{bundle_adjustment_result['rms']:.2f}",
         rms_mm=f"{rms_mm:.3f}",
-        px_per_mm=f"{mdl.fx * args.downscale / np.mean([mdl.depth(f) for f in frames]):.0f}",
+        px_per_mm=f"{rig_model.fx * args.downscale / np.mean([rig_model.depth(frame) for frame in frames]):.0f}",
         area_cm2=f"{area_cm2:.0f}",
     )
-    export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, ba["track_err"], stats)
+    export_surface_viewer_html(out_dir, frames, camera_rotations, camera_centers, rig_model, pos, uvn, faces, landmark_points, bundle_adjustment_result["track_err"], stats)
 
     placements = dict(
         capture_dir=args.capture_dir,
         downscale=args.downscale,
         rig_model=dict(
-            fx_ds_px=mdl.fx,
-            fx_fullres_px=mdl.fx * args.downscale,
-            k1=mdl.k1,
-            cx=mdl.cx,
-            cy=mdl.cy,
-            rx_sign=mdl.sign,
-            lever_mm=mdl.lever.tolist(),
-            Rm=mdl.Rm.tolist(),
-            dz0_mm=mdl.dz0,
-            base_R=mdl.base_R.tolist(),
-            base_t=mdl.base_t.tolist(),
+            fx_ds_px=rig_model.fx,
+            fx_fullres_px=rig_model.fx * args.downscale,
+            k1=rig_model.k1,
+            cx=rig_model.cx,
+            cy=rig_model.cy,
+            rx_sign=rig_model.sign,
+            lever_mm=rig_model.lever.tolist(),
+            Rm=rig_model.Rm.tolist(),
+            dz0_mm=rig_model.dz0,
+            base_R=rig_model.base_R.tolist(),
+            base_t=rig_model.base_t.tolist(),
         ),
         ba=dict(
-            rms_px=ba["rms"],
+            rms_px=bundle_adjustment_result["rms"],
             rms_mm=rms_mm,
-            history=ba["history"],
-            n_landmarks=int(len(X)),
-            n_obs=int(len(ba["obs_uv"])),
+            history=bundle_adjustment_result["history"],
+            n_landmarks=int(len(landmark_points)),
+            n_obs=int(len(bundle_adjustment_result["obs_uv"])),
         ),
         surface=dict(
             pitch_mm=args.surface_pitch, smooth=args.surface_smooth, landmark_rms_mm=surf_rms
@@ -102,50 +102,50 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
             ppmm=float(args.texture_ppmm),
             W=int(tex.shape[1]),
             H=int(tex.shape[0]),
-            arclen_gy_mm=tp.gy.tolist(),
-            arclen_s_mm=tp.s.tolist(),
+            arclen_gy_mm=texture_parameters.gy.tolist(),
+            arclen_s_mm=texture_parameters.s.tolist(),
         ),
         frames=[
             dict(
-                idx=f.idx,
-                station=f.station,
-                row=f.row,
-                col=f.col,
-                image=os.path.basename(f.image_path),
-                C_mm=C[f.idx].tolist(),
-                R_cam2world=R[f.idx].tolist(),
+                idx=frame.idx,
+                station=frame.station,
+                row=frame.row,
+                col=frame.col,
+                image=os.path.basename(frame.image_path),
+                C_mm=camera_centers[frame.idx].tolist(),
+                R_cam2world=camera_rotations[frame.idx].tolist(),
                 gantry=dict(
-                    x=f.g[0],
-                    y=f.g[1],
-                    z=f.g[2],
-                    rx_deg=math.degrees(f.rx),
-                    standoff_mm=f.standoff,
-                    settled=f.settled,
+                    x=frame.g[0],
+                    y=frame.g[1],
+                    z=frame.g[2],
+                    rx_deg=math.degrees(frame.rx),
+                    standoff_mm=frame.standoff,
+                    settled=frame.settled,
                 ),
-                prior_dev_mm=float(dt[f.idx]),
-                prior_dev_deg=float(dr[f.idx]),
-                median_reproj_px=(None if np.isnan(med_err[f.idx]) else float(med_err[f.idx])),
+                prior_dev_mm=float(dt[frame.idx]),
+                prior_dev_deg=float(dr[frame.idx]),
+                median_reproj_px=(None if np.isnan(med_err[frame.idx]) else float(med_err[frame.idx])),
             )
-            for f in frames
+            for frame in frames
         ],
     )
     with open(os.path.join(out_dir, "placements3d.json"), "w") as fh:
         json.dump(placements, fh, indent=1)
 
-    pxmm_full = mdl.fx * args.downscale / np.mean([mdl.depth(f) for f in frames])
+    pxmm_full = rig_model.fx * args.downscale / np.mean([rig_model.depth(frame) for frame in frames])
     with open(os.path.join(out_dir, "report.txt"), "w") as fh:
         fh.write(f"3D registration report for {args.capture_dir}\n")
         fh.write(
             f"frames: {len(frames)}  pairs: {len(pairs)}  "
-            f"landmarks: {len(X)}  obs: {len(ba['obs_uv'])}\n\n"
+            f"landmarks: {len(landmark_points)}  obs: {len(bundle_adjustment_result['obs_uv'])}\n\n"
         )
         fh.write("-- accuracy --------------------------------------------------\n")
         fh.write(f"rig pre-fit rms (consecutive pairs):  {prefit_rms:.2f} px (ds)\n")
         fh.write(
-            f"BA reprojection rms:                  {ba['rms']:.2f} px (ds) "
+            f"BA reprojection rms:                  {bundle_adjustment_result['rms']:.2f} px (ds) "
             f"= {rms_mm * 1000:.0f} um on skin\n"
         )
-        fh.write(f"BA rms history: {' -> '.join(f'{h:.2f}' for h in ba['history'])}\n")
+        fh.write(f"BA rms history: {' -> '.join(f'{image_height:.2f}' for image_height in bundle_adjustment_result['history'])}\n")
         fh.write(f"surface fit rms (landmark->surface):  {surf_rms:.3f} mm\n")
         fh.write(
             f"pose deviation from proprioception:   |dt| median "
@@ -159,22 +159,22 @@ def export_scan_reconstruction_artifacts(args, problem, solution):
             fh.write(f"{msg_settle}\n")
         fh.write("\n-- fitted rig model ------------------------------------------\n")
         fh.write(
-            f"fx = {mdl.fx * args.downscale:.0f} px (full res) -> {pxmm_full:.1f} px/mm on skin\n"
+            f"fx = {rig_model.fx * args.downscale:.0f} px (full res) -> {pxmm_full:.1f} px/mm on skin\n"
         )
-        fh.write(f"k1 = {mdl.k1:+.4f}\n")
+        fh.write(f"k1 = {rig_model.k1:+.4f}\n")
         fh.write(
-            f"rx sign = {mdl.sign:+.0f}, lever arm = {mdl.lever.round(1).tolist()} mm "
-            f"(|{np.linalg.norm(mdl.lever):.1f}| mm)\n"
+            f"rx sign = {rig_model.sign:+.0f}, lever arm = {rig_model.lever.round(1).tolist()} mm "
+            f"(|{np.linalg.norm(rig_model.lever):.1f}| mm)\n"
         )
-        fh.write(f"sensor->optical-centre depth offset dz0 = {mdl.dz0:+.1f} mm\n")
+        fh.write(f"sensor->optical-centre depth offset dz0 = {rig_model.dz0:+.1f} mm\n")
         fh.write(RECOMMENDATIONS)
         fh.write("\nper-frame (station, row/col, settled, prior dev mm/deg, median reproj px):\n")
-        for f in frames:
-            me = med_err[f.idx]
+        for frame in frames:
+            me = med_err[frame.idx]
             fh.write(
-                f"  st{f.station:>3} r{f.row:>2}c{f.col:>2} "
-                f"{'S' if f.settled else '.'} "
-                f"{dt[f.idx]:6.2f}mm {dr[f.idx]:5.2f}deg "
+                f"  st{frame.station:>3} r{frame.row:>2}c{frame.col:>2} "
+                f"{'S' if frame.settled else '.'} "
+                f"{dt[frame.idx]:6.2f}mm {dr[frame.idx]:5.2f}deg "
                 f"{me if not np.isnan(me) else float('nan'):6.2f}px\n"
             )
     print(f"      wrote {os.path.join(out_dir, 'report.txt')}")

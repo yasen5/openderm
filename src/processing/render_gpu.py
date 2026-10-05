@@ -31,7 +31,7 @@ import numpy as np
 
 try:
     import torch
-    import torch.nn.functional as F
+    import torch.nn.functional as torch_functional
     from torchvision.io import read_file, decode_jpeg, ImageReadMode
 
     _TORCH = True
@@ -60,9 +60,9 @@ class GpuGeom:
     def __init__(
         self,
         surf,
-        tp,
-        R,
-        C,
+        texture_parameters,
+        camera_rotations,
+        camera_centers,
         fxf,
         k1,
         cxf,
@@ -75,13 +75,13 @@ class GpuGeom:
         warp,
         device="cuda",
     ):
-        d = torch.device(device)
-        f64 = dict(dtype=torch.float64, device=d)
-        self.dev = d
+        distance = torch.device(device)
+        f64 = dict(dtype=torch.float64, device=distance)
+        self.dev = distance
         self.zg = torch.tensor(surf.z, **f64)
         self.gxg = torch.tensor(surf.gx, **f64)
         self.gyg = torch.tensor(surf.gy, **f64)
-        self.supg = torch.tensor(surf.support.astype(np.uint8), device=d)
+        self.supg = torch.tensor(surf.support.astype(np.uint8), device=distance)
         self.xs0, self.dxs, self.nx = (
             float(surf.xs[0]),
             float(surf.xs[1] - surf.xs[0]),
@@ -92,12 +92,12 @@ class GpuGeom:
             float(surf.ys[1] - surf.ys[0]),
             len(surf.ys),
         )
-        self.bR = torch.tensor(np.asarray(tp.bR), **f64)
-        self.bt = torch.tensor(np.asarray(tp.bt), **f64)
-        self.arc_s = torch.tensor(tp.s, **f64)
-        self.arc_gy = torch.tensor(tp.gy, **f64)
-        self.R = torch.tensor(np.stack(list(R)), **f64)  # (F,3,3) cam->world
-        self.C = torch.tensor(np.stack(list(C)), **f64)  # (F,3)
+        self.bR = torch.tensor(np.asarray(texture_parameters.bR), **f64)
+        self.bt = torch.tensor(np.asarray(texture_parameters.bt), **f64)
+        self.arc_s = torch.tensor(texture_parameters.s, **f64)
+        self.arc_gy = torch.tensor(texture_parameters.gy, **f64)
+        self.R = torch.tensor(np.stack(list(camera_rotations)), **f64)  # (F,3,3) cam->world
+        self.C = torch.tensor(np.stack(list(camera_centers)), **f64)  # (F,3)
         self.fxf, self.k1 = float(fxf), float(k1)
         self.cxf, self.cyf = float(cxf), float(cyf)
         self.Wf, self.Hf = float(Wf), float(Hf)
@@ -116,41 +116,41 @@ class GpuGeom:
             )
 
     @staticmethod
-    def _interp1(x, xp, fp):
+    def _interp1(array, xp, fp):
         """np.interp for monotonically increasing xp (endpoint-clamped)."""
-        i = torch.searchsorted(xp, x).clamp(1, len(xp) - 1)
-        x0, x1 = xp[i - 1], xp[i]
-        f0, f1 = fp[i - 1], fp[i]
-        t = ((x - x0) / (x1 - x0)).clamp(0.0, 1.0)
-        return f0 + t * (f1 - f0)
+        index = torch.searchsorted(xp, array).clamp(1, len(xp) - 1)
+        x0, x1 = xp[index - 1], xp[index]
+        f0, f1 = fp[index - 1], fp[index]
+        threshold = ((array - x0) / (x1 - x0)).clamp(0.0, 1.0)
+        return f0 + threshold * (f1 - f0)
 
-    def _bil(self, grid, x, y):
+    def _bil(self, grid, array, world_y):
         """Surface-grid bilinear interp, identical clip/floor to Surface._interp."""
-        xi = ((x - self.xs0) / self.dxs).clamp(0, self.nx - 1.001)
-        yi = ((y - self.ys0) / self.dys).clamp(0, self.ny - 1.001)
+        xi = ((array - self.xs0) / self.dxs).clamp(0, self.nx - 1.001)
+        yi = ((world_y - self.ys0) / self.dys).clamp(0, self.ny - 1.001)
         x0 = xi.floor().long()
         y0 = yi.floor().long()
         fx = xi - x0
         fy = yi - y0
-        g = grid
-        return (g[y0, x0] * (1 - fx) + g[y0, x0 + 1] * fx) * (1 - fy) + (
-            g[y0 + 1, x0] * (1 - fx) + g[y0 + 1, x0 + 1] * fx
+        gauge = grid
+        return (gauge[y0, x0] * (1 - fx) + gauge[y0, x0 + 1] * fx) * (1 - fy) + (
+            gauge[y0 + 1, x0] * (1 - fx) + gauge[y0 + 1, x0 + 1] * fx
         ) * fy
 
-    def _height(self, x, y):
-        return self._bil(self.zg, x, y)
+    def _height(self, array, world_y):
+        return self._bil(self.zg, array, world_y)
 
-    def _to_xy(self, u, v):
+    def _to_xy(self, texture_u, texture_v):
         """TexParam.to_xy: arc-length -> gantry y, then 6 Newton steps."""
-        gy = self._interp1(v, self.arc_s, self.arc_gy)
-        x = u.clone()
-        y = gy.clone()
-        for _ in range(6):
-            P = torch.stack([x, y, self._height(x, y)], -1)
-            Pg = (P - self.bt) @ self.bR
-            x = x - (Pg[..., 0] - u)
-            y = y - (Pg[..., 1] - gy)
-        return x, y
+        gy = self._interp1(texture_v, self.arc_s, self.arc_gy)
+        array = texture_u.clone()
+        world_y = gy.clone()
+        for iteration_index in range(6):
+            points = torch.stack([array, world_y, self._height(array, world_y)], -1)
+            Pg = (points - self.bt) @ self.bR
+            array = array - (Pg[..., 0] - texture_u)
+            world_y = world_y - (Pg[..., 1] - gy)
+        return array, world_y
 
     def fields(self, fidx, uu, vv):
         """Decimated geometry fields for one frame's tile.
@@ -164,9 +164,9 @@ class GpuGeom:
             torch.cuda.empty_cache()
             try:
                 return self._fields(fidx, uu, vv)
-            except torch.OutOfMemoryError as e:
+            except torch.OutOfMemoryError as caught_exception:
                 torch.cuda.empty_cache()
-                raise GpuOom(str(e)) from None
+                raise GpuOom(str(caught_exception)) from None
 
     def _fields(self, fidx, uu, vv):
         f64 = dict(dtype=torch.float64, device=self.dev)
@@ -179,22 +179,22 @@ class GpuGeom:
         if self.warp is not None:
             Mu, Mv, umid, vmid = self.warp
             du, dv = Uw - umid, Vw - vmid
-            a, b = Mu[fidx], Mv[fidx]
-            cu = a[0] * du + a[1] * dv + a[2]
-            cv = b[0] * du + b[1] * dv + b[2]
-            if a.shape[0] == 6:  # quadratic warp (solved as mm^2/50)
+            first_value, second_value = Mu[fidx], Mv[fidx]
+            cu = first_value[0] * du + first_value[1] * dv + first_value[2]
+            cv = second_value[0] * du + second_value[1] * dv + second_value[2]
+            if first_value.shape[0] == 6:  # quadratic warp (solved as mm^2/50)
                 q0, q1, q2 = du * du / 50.0, du * dv / 50.0, dv * dv / 50.0
-                cu = cu + a[3] * q0 + a[4] * q1 + a[5] * q2
-                cv = cv + b[3] * q0 + b[4] * q1 + b[5] * q2
+                cu = cu + first_value[3] * q0 + first_value[4] * q1 + first_value[5] * q2
+                cv = cv + second_value[3] * q0 + second_value[4] * q1 + second_value[5] * q2
             Uw = Uw - cu
             Vw = Vw - cv
         Xg, Yg = self._to_xy(Uw, Vw)
         Zg = self._height(Xg, Yg)
-        P = torch.stack([Xg, Yg, Zg], 1)
-        xc = (P - self.C[fidx]) @ self.R[fidx]
+        points = torch.stack([Xg, Yg, Zg], 1)
+        xc = (points - self.C[fidx]) @ self.R[fidx]
         zc = xc[:, 2]
-        z = torch.clamp(zc, min=1e-6)
-        xn = xc[:, :2] / z[:, None]
+        world_z = torch.clamp(zc, min=1e-6)
+        xn = xc[:, :2] / world_z[:, None]
         fdist = 1.0 + self.k1 * (xn**2).sum(1)
         uvx = self.fxf * xn[:, 0] * fdist + self.cxf
         uvy = self.fxf * xn[:, 1] * fdist + self.cyf
@@ -218,7 +218,7 @@ class GpuGeom:
             gy = self._bil(self.gyg, Xg, Yg)
             nrm = torch.stack([-gx, -gy, torch.ones_like(gx)], 1) * self.up_sign
             nrm = nrm / nrm.norm(dim=1, keepdim=True)
-            ray = P - self.C[fidx]
+            ray = points - self.C[fidx]
             ray = ray / torch.clamp(ray.norm(dim=1, keepdim=True), min=1e-9)
             cosi = (nrm * ray).sum(1).abs()
             import math as _m
@@ -246,22 +246,22 @@ class GpuFramePipe:
         self._kern = {}  # (ksize, sigma) -> taps
 
     # -- VRAM-resident canvases ----------------------------------------------
-    def canvas_fits(self, H, W) -> bool:
+    def canvas_fits(self, canvas_height, canvas_width) -> bool:
         """Would device canvases + per-frame transients fit comfortably?"""
         per_texel = 32 if self.blend_mode == "two-band" else 16
-        free, _ = torch.cuda.mem_get_info(self.dev)
-        return H * W * per_texel < 0.45 * free
+        free, total = torch.cuda.mem_get_info(self.dev)
+        return canvas_height * canvas_width * per_texel < 0.45 * free
 
-    def canvases_begin(self, H, W):
+    def canvases_begin(self, canvas_height, canvas_width):
         """Accumulate deposits on-device: kills the per-frame PCIe download
         and the CPU-side += (fp32 elementwise adds in the same frame order --
         results identical to the numpy accumulation)."""
-        z = lambda *s: torch.zeros(*s, dtype=torch.float32, device=self.dev)
-        self.cacc = z(3, H, W)
-        self.cwacc = z(H, W)
+        world_z = lambda *score: torch.zeros(*score, dtype=torch.float32, device=self.dev)
+        self.cacc = world_z(3, canvas_height, canvas_width)
+        self.cwacc = world_z(canvas_height, canvas_width)
         if self.blend_mode == "two-band":
-            self.chf = z(3, H, W)
-            self.cwbest = z(H, W)
+            self.chf = world_z(3, canvas_height, canvas_width)
+            self.cwbest = world_z(canvas_height, canvas_width)
         self.canvas = True
 
     def canvases_take(self):
@@ -285,43 +285,43 @@ class GpuFramePipe:
         ksize = int(round(sigma * 4 * 2 + 1)) | 1
         key = (ksize, float(sigma))
         if key not in self._kern:
-            k = cv2.getGaussianKernel(ksize, sigma, cv2.CV_32F)[:, 0]
-            self._kern[key] = torch.from_numpy(k).to(self.dev)
+            item_index = cv2.getGaussianKernel(ksize, sigma, cv2.CV_32F)[:, 0]
+            self._kern[key] = torch.from_numpy(item_index).to(self.dev)
         return self._kern[key]
 
-    def _blur(self, x, sigma):
+    def _blur(self, array, sigma):
         """Separable Gaussian, REFLECT_101 border, on (C,H,W) or (H,W)."""
-        squeeze = x.dim() == 2
+        squeeze = array.dim() == 2
         if squeeze:
-            x = x[None]
-        k = self._gauss1d(sigma)
-        r = len(k) // 2
-        c, h, w = x.shape
-        if r >= h or r >= w:
+            array = array[None]
+        item_index = self._gauss1d(sigma)
+        camera_rotation = len(item_index) // 2
+        candidate, image_height, image_width = array.shape
+        if camera_rotation >= image_height or camera_rotation >= image_width:
             # torch reflect-pad needs pad < dim; tiny clipped edge tiles take
             # the exact cv2 path instead (identical taps, negligible size)
-            arr = x.permute(1, 2, 0).cpu().numpy()
+            arr = array.permute(1, 2, 0).cpu().numpy()
             arr = cv2.GaussianBlur(arr, (0, 0), sigma)
-            out = torch.from_numpy(arr.reshape(h, w, c)).to(self.dev)
+            out = torch.from_numpy(arr.reshape(image_height, image_width, candidate)).to(self.dev)
             out = out.permute(2, 0, 1)
             return out[0] if squeeze else out
-        x = x[None]  # (1,C,H,W)
-        x = F.pad(x, (r, r, 0, 0), mode="reflect")
-        x = F.conv2d(x, k.view(1, 1, 1, -1).expand(c, 1, 1, -1), groups=c)
-        x = F.pad(x, (0, 0, r, r), mode="reflect")
-        x = F.conv2d(x, k.view(1, 1, -1, 1).expand(c, 1, -1, 1), groups=c)
-        x = x[0]
-        return x[0] if squeeze else x
+        array = array[None]  # (1,C,H,W)
+        array = torch_functional.pad(array, (camera_rotation, camera_rotation, 0, 0), mode="reflect")
+        array = torch_functional.conv2d(array, item_index.view(1, 1, 1, -1).expand(candidate, 1, 1, -1), groups=candidate)
+        array = torch_functional.pad(array, (0, 0, camera_rotation, camera_rotation), mode="reflect")
+        array = torch_functional.conv2d(array, item_index.view(1, 1, -1, 1).expand(candidate, 1, -1, 1), groups=candidate)
+        array = array[0]
+        return array[0] if squeeze else array
 
-    def _up(self, fields, h, w):
+    def _up(self, fields, image_height, image_width):
         """Bilinear upsample (C,hd,wd) -> (C,h,w); cv2.INTER_LINEAR match."""
-        if fields.shape[-2:] == (h, w):
+        if fields.shape[-2:] == (image_height, image_width):
             return fields
-        return F.interpolate(fields[None], size=(h, w), mode="bilinear", align_corners=False)[0]
+        return torch_functional.interpolate(fields[None], size=(image_height, image_width), mode="bilinear", align_corners=False)[0]
 
-    def _area(self, x, h, w):
+    def _area(self, array, image_height, image_width):
         """cv2.INTER_AREA-style box downsample on (C,H,W)."""
-        return F.interpolate(x[None], size=(h, w), mode="area")[0]
+        return torch_functional.interpolate(array[None], size=(image_height, image_width), mode="area")[0]
 
     def decode(self, path, sscale):
         """BGR float32 (3,H,W) on device, optionally INTER_AREA downscaled."""
@@ -345,33 +345,33 @@ class GpuFramePipe:
 
     def _sample(self, im, mapx, mapy):
         """cv2.remap(INTER_LINEAR, BORDER_CONSTANT=0) via grid_sample."""
-        _, Hi, Wi = im.shape
-        gx = (mapx + 0.5) * (2.0 / Wi) - 1.0
-        gy = (mapy + 0.5) * (2.0 / Hi) - 1.0
+        channel_count, image_height, image_width = im.shape
+        gx = (mapx + 0.5) * (2.0 / image_width) - 1.0
+        gy = (mapy + 0.5) * (2.0 / image_height) - 1.0
         grid = torch.stack([gx, gy], -1)[None]
-        return F.grid_sample(
+        return torch_functional.grid_sample(
             im[None], grid, mode="bilinear", padding_mode="zeros", align_corners=False
         )[0]
 
     # -- ownership pre-pass ----------------------------------------------------
-    def ownership_begin(self, H, W):
+    def ownership_begin(self, canvas_height, canvas_width):
         """Raises GpuOom when the three (H,W) fields don't fit (e.g. another
         process holds the GPU); the caller streams ownership on CPU instead."""
-        free, _ = torch.cuda.mem_get_info(self.dev)
-        if H * W * 12 > 0.6 * free:
+        free, total = torch.cuda.mem_get_info(self.dev)
+        if canvas_height * canvas_width * 12 > 0.6 * free:
             raise GpuOom(
-                f"ownership fields need {H * W * 12 / 1e9:.1f} GB, {free / 1e9:.1f} GB free"
+                f"ownership fields need {canvas_height * canvas_width * 12 / 1e9:.1f} GB, {free / 1e9:.1f} GB free"
             )
         try:
-            self._own_max = torch.zeros(H, W, device=self.dev)
-            self._own_arg = torch.full((H, W), -1, dtype=torch.int32, device=self.dev)
-            self._own_sum = torch.zeros(H, W, device=self.dev)
-        except torch.OutOfMemoryError as e:
-            for a in ("_own_max", "_own_arg", "_own_sum"):
-                if hasattr(self, a):
-                    delattr(self, a)
+            self._own_max = torch.zeros(canvas_height, canvas_width, device=self.dev)
+            self._own_arg = torch.full((canvas_height, canvas_width), -1, dtype=torch.int32, device=self.dev)
+            self._own_sum = torch.zeros(canvas_height, canvas_width, device=self.dev)
+        except torch.OutOfMemoryError as caught_exception:
+            for first_value in ("_own_max", "_own_arg", "_own_sum"):
+                if hasattr(self, first_value):
+                    delattr(self, first_value)
             torch.cuda.empty_cache()
-            raise GpuOom(str(e)) from None
+            raise GpuOom(str(caught_exception)) from None
         self._own_gid = None
 
     def ownership_add(self, gid, rect, wgt_dec):
@@ -384,10 +384,10 @@ class GpuFramePipe:
         self._own_gid = gid
         try:
             if torch.is_tensor(wgt_dec):
-                w = wgt_dec
+                image_width = wgt_dec
             else:
-                w = torch.from_numpy(np.ascontiguousarray(wgt_dec)).to(self.dev)
-            self._own_sum[v0:v1, u0:u1] += self._up(w[None], v1 - v0, u1 - u0)[0]
+                image_width = torch.from_numpy(np.ascontiguousarray(wgt_dec)).to(self.dev)
+            self._own_sum[v0:v1, u0:u1] += self._up(image_width[None], v1 - v0, u1 - u0)[0]
         except torch.OutOfMemoryError:
             # monster (warp-inflated) tile: upsample on CPU (same bilinear
             # convention) and stream row-bands into the running sum
@@ -395,9 +395,9 @@ class GpuFramePipe:
             wnp = wgt_dec.cpu().numpy() if torch.is_tensor(wgt_dec) else wgt_dec
             arr = cv2.resize(wnp, (u1 - u0, v1 - v0), interpolation=cv2.INTER_LINEAR)
             step = max(1, (1 << 26) // max(1, u1 - u0))
-            for y in range(0, v1 - v0, step):
-                band = torch.from_numpy(arr[y : y + step]).to(self.dev)
-                self._own_sum[v0 + y : v0 + y + band.shape[0], u0:u1] += band
+            for world_y in range(0, v1 - v0, step):
+                band = torch.from_numpy(arr[world_y : world_y + step]).to(self.dev)
+                self._own_sum[v0 + world_y : v0 + world_y + band.shape[0], u0:u1] += band
 
     def _ownership_merge(self):
         win = self._own_sum > self._own_max
@@ -429,7 +429,7 @@ class GpuFramePipe:
         best_g=None,
         gid=None,
         lf_gate=None,
-        ppmm=0.0,
+        pixels_per_mm=0.0,
         hf_coherence_mm=0.0,
         gain=None,
     ):
@@ -450,7 +450,7 @@ class GpuFramePipe:
             best_g=best_g,
             gid=gid,
             lf_gate=lf_gate,
-            ppmm=ppmm,
+            pixels_per_mm=pixels_per_mm,
             hf_coherence_mm=hf_coherence_mm,
             gain=gain,
         )
@@ -460,9 +460,9 @@ class GpuFramePipe:
             torch.cuda.empty_cache()
             try:
                 return self._frame(*args, **kw)
-            except torch.OutOfMemoryError as e:
+            except torch.OutOfMemoryError as caught_exception:
                 torch.cuda.empty_cache()
-                raise GpuOom(str(e)) from None
+                raise GpuOom(str(caught_exception)) from None
 
     def _frame(
         self,
@@ -476,18 +476,18 @@ class GpuFramePipe:
         best_g,
         gid,
         lf_gate,
-        ppmm,
+        pixels_per_mm,
         hf_coherence_mm,
         gain=None,
     ):
         u0, u1, v0, v1 = rect
-        h, w = v1 - v0, u1 - u0
+        image_height, image_width = v1 - v0, u1 - u0
         if torch.is_tensor(dec_fields):
-            t = dec_fields  # already on device (GpuGeom)
+            threshold = dec_fields  # already on device (GpuGeom)
         else:
-            t = torch.from_numpy(np.ascontiguousarray(dec_fields)).to(self.dev)
-        f4 = self._up(t, h, w)
-        del t
+            threshold = torch.from_numpy(np.ascontiguousarray(dec_fields)).to(self.dev)
+        f4 = self._up(threshold, image_height, image_width)
+        del threshold
         # SUPPORT CROP: a deformable-warped footprint can project a tile far
         # larger than the frame's actual deposit (everything outside the
         # feather x incidence x support weight is zero; wgt2>0 implies
@@ -500,17 +500,17 @@ class GpuFramePipe:
         if len(rows) == 0:
             return None
         cols = torch.where(sup.any(dim=0))[0]
-        marg = int(round(4.0 * hf_coherence_mm * ppmm + ppmm))
+        marg = int(round(4.0 * hf_coherence_mm * pixels_per_mm + pixels_per_mm))
         y0c = max(int(rows[0]) - marg, 0)
-        y1c = min(int(rows[-1]) + 1 + marg, h)
+        y1c = min(int(rows[-1]) + 1 + marg, image_height)
         x0c = max(int(cols[0]) - marg, 0)
-        x1c = min(int(cols[-1]) + 1 + marg, w)
+        x1c = min(int(cols[-1]) + 1 + marg, image_width)
         del sup, rows, cols
-        if (y1c - y0c) * (x1c - x0c) < 0.6 * h * w:
+        if (y1c - y0c) * (x1c - x0c) < 0.6 * image_height * image_width:
             f4 = f4[:, y0c:y1c, x0c:x1c].contiguous()
             u0, v0 = u0 + x0c, v0 + y0c
-            h, w = y1c - y0c, x1c - x0c
-            u1, v1 = u0 + w, v0 + h
+            image_height, image_width = y1c - y0c, x1c - x0c
+            u1, v1 = u0 + image_width, v0 + image_height
         mapx, mapy, wgt2, soft = f4
         rect = (u0, u1, v0, v1)
 
@@ -540,8 +540,8 @@ class GpuFramePipe:
             del gm
         if focus_weight > 0:
             pxmm_im = img_pxmm * sscale
-            b, g, r = im[0], im[1], im[2]
-            gray = 0.114 * b + 0.587 * g + 0.299 * r
+            second_value, gauge, camera_rotation = im[0], im[1], im[2]
+            gray = 0.114 * second_value + 0.587 * gauge + 0.299 * camera_rotation
             hf_im = gray - self._blur(gray, max(1.0, 0.06 * pxmm_im))
             en = self._blur(hf_im * hf_im, max(3.0, 1.5 * pxmm_im))
             del hf_im
@@ -553,11 +553,11 @@ class GpuFramePipe:
             del sharp
         del im, f4, mapx, mapy
 
-        def npy(x):
-            return x.cpu().numpy()
+        def npy(array):
+            return array.cpu().numpy()
 
-        def npy_hwc(x):
-            return x.permute(1, 2, 0).contiguous().cpu().numpy()
+        def npy_hwc(array):
+            return array.permute(1, 2, 0).contiguous().cpu().numpy()
 
         if self.blend_mode != "two-band":
             if self.canvas:
@@ -566,27 +566,27 @@ class GpuFramePipe:
                 return dict(rect=rect, accumulated=True)
             return dict(rect=rect, col=npy_hwc(col), wgt2=npy(wgt2))
 
-        m = (soft > 0).float()
-        sig = 2.0 * ppmm
+        mask = (soft > 0).float()
+        sig = 2.0 * pixels_per_mm
         r_ = max(1, int(round(sig / 12.0)))
         if r_ > 1:
-            sw, sh_ = max(1, w // r_), max(1, h // r_)
-            lo = self._blur(self._area(col * m[None], sh_, sw), sig / r_)
-            ml = self._blur(self._area(m[None], sh_, sw), sig / r_)
-            lo = self._up(lo, h, w)
-            ml = self._up(ml, h, w)[0]
+            sw, sh_ = max(1, image_width // r_), max(1, image_height // r_)
+            lo = self._blur(self._area(col * mask[None], sh_, sw), sig / r_)
+            ml = self._blur(self._area(mask[None], sh_, sw), sig / r_)
+            lo = self._up(lo, image_height, image_width)
+            ml = self._up(ml, image_height, image_width)[0]
         else:
-            lo = self._blur(col * m[None], sig)
-            ml = self._blur(m, sig)
+            lo = self._blur(col * mask[None], sig)
+            ml = self._blur(mask, sig)
         lo = lo / torch.clamp(ml, min=1e-6)[None]
         del ml
-        hf = (col - lo) * m[None]
-        del col, m
+        hf = (col - lo) * mask[None]
+        del col, mask
         if lf_gate is not None:
             gate = torch.from_numpy(np.ascontiguousarray(lf_gate[v0:v1, u0:u1]))
             soft = soft * (gate.to(self.dev).float() / 255.0)
             del gate
-        wown = wgt2 if hf_coherence_mm <= 0 else self._blur(wgt2, hf_coherence_mm * ppmm)
+        wown = wgt2 if hf_coherence_mm <= 0 else self._blur(wgt2, hf_coherence_mm * pixels_per_mm)
         if self.canvas:
             self.cacc[:, v0:v1, u0:u1] += lo * soft[None]
             self.cwacc[v0:v1, u0:u1] += soft

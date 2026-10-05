@@ -7,7 +7,7 @@ import json
 import math
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import MISSING, dataclass, field, fields
 
 import cv2
 import numpy as np
@@ -16,7 +16,7 @@ import numpy as np
 # ----------------------------------------------------------------------------
 # data loading
 # ----------------------------------------------------------------------------
-@dataclass
+@dataclass(init=False)
 class Frame:
     idx: int
     station: int
@@ -25,7 +25,7 @@ class Frame:
     phase: str  # contour-scan y sweep phase ('+y'/'-y'); backs have none
     sidecar: str
     image_path: str
-    g: np.ndarray  # gantry (x, y, z) mm
+    gauge: np.ndarray  # gantry (x, y, z) mm
     rx: float  # radians
     standoff: float  # mean of in-range distance sensors, mm
     settled: bool
@@ -36,6 +36,39 @@ class Frame:
     des: np.ndarray = field(default=None, repr=False)
     shape: tuple = None
 
+    def __init__(self, *positional_values, **frame_values):
+        # ``g`` was the original capture-side field name. Accept it when
+        # reading older callers while keeping the stored field descriptive.
+        if "g" in frame_values:
+            if "gauge" in frame_values:
+                raise TypeError("Frame received both 'g' and 'gauge'")
+            frame_values["gauge"] = frame_values.pop("g")
+        frame_fields = fields(type(self))
+        if len(positional_values) > len(frame_fields):
+            raise TypeError("Frame received too many positional arguments")
+        for frame_field, field_value in zip(frame_fields, positional_values):
+            if frame_field.name in frame_values:
+                raise TypeError(f"Frame received multiple values for {frame_field.name!r}")
+            frame_values[frame_field.name] = field_value
+        for frame_field in frame_fields:
+            if frame_field.name in frame_values:
+                field_value = frame_values.pop(frame_field.name)
+            elif frame_field.default is not MISSING:
+                field_value = frame_field.default
+            elif frame_field.default_factory is not MISSING:
+                field_value = frame_field.default_factory()
+            else:
+                raise TypeError(f"Frame is missing required field {frame_field.name!r}")
+            setattr(self, frame_field.name, field_value)
+        if frame_values:
+            unexpected_field = next(iter(frame_values))
+            raise TypeError(f"Frame got an unexpected keyword argument {unexpected_field!r}")
+
+    def __getattr__(self, field_name):
+        if field_name == "g":
+            return self.gauge
+        raise AttributeError(field_name)
+
 
 def load_scan_camera_frames(
     capture_dir: str,
@@ -45,73 +78,80 @@ def load_scan_camera_frames(
     col_range: tuple[int, int] | None = None,
 ) -> list[Frame]:
     sidecars = sorted(glob.glob(os.path.join(capture_dir, "*.json")))
-    records = []
-    for sc in sidecars:
+    capture_records = []
+    for sidecar_path in sidecars:
         try:
-            with open(sc) as fh:
-                txt = fh.read()
-            if not txt.strip():
+            with open(sidecar_path) as fh:
+                sidecar_text = fh.read()
+            if not sidecar_text.strip():
                 raise ValueError("empty file")
-            d = json.loads(txt)
-        except (ValueError, json.JSONDecodeError) as e:
+            frame_metadata = json.loads(sidecar_text)
+        except (ValueError, json.JSONDecodeError) as caught_exception:
             # Capture glitches can leave zero-byte or truncated sidecars; skip
             # them instead of crashing the run.
-            print(f"  ! skipping unreadable sidecar {os.path.basename(sc)} ({e})")
+            print(f"  ! skipping unreadable sidecar {os.path.basename(sidecar_path)} ({caught_exception})")
             continue
-        if not isinstance(d, dict):
+        if not isinstance(frame_metadata, dict):
             continue
-        img = d.get("image")
-        if img and not os.path.isabs(img):
-            cand = img if os.path.exists(img) else os.path.join(capture_dir, os.path.basename(img))
+        image_reference = frame_metadata.get("image")
+        if image_reference and not os.path.isabs(image_reference):
+            image_path = image_reference if os.path.exists(image_reference) else os.path.join(capture_dir, os.path.basename(image_reference))
         else:
-            cand = img
-        if not cand or not os.path.exists(cand):
-            print(f"  ! skipping {os.path.basename(sc)} (image not found: {img})")
+            image_path = image_reference
+        if not image_path or not os.path.exists(image_path):
+            print(f"  ! skipping {os.path.basename(sidecar_path)} (image not found: {image_reference})")
             continue
-        records.append((sc, cand, d))
+        capture_records.append((sidecar_path, image_path, frame_metadata))
     # a station re-captured later (aborted run restarted) supersedes the
     # earlier shot; sidecars are timestamp-sorted so the last one wins
     by_station: dict = {}
-    for sc, cand, d in records:
-        key = d.get("station", os.path.basename(sc))
-        if key in by_station:
-            print(f"  ! dropping superseded station {key}: {os.path.basename(by_station[key][0])}")
-        by_station[key] = (sc, cand, d)
-    records = [by_station[k] for k in sorted(by_station, key=str)]
-    records.sort(key=lambda r: r[0])
+    for sidecar_path, image_path, frame_metadata in capture_records:
+        station_key = frame_metadata.get("station", os.path.basename(sidecar_path))
+        if station_key in by_station:
+            print(f"  ! dropping superseded station {station_key}: {os.path.basename(by_station[station_key][0])}")
+        by_station[station_key] = (sidecar_path, image_path, frame_metadata)
+    capture_records = [by_station[item_index] for item_index in sorted(by_station, key=str)]
+    capture_records.sort(key=lambda capture_record: capture_record[0])
     frames = []
-    for sc, cand, d in records:
-        row = int(d.get("row", 1))
-        if limit_rows and row > limit_rows:
+    for sidecar_path, image_path, frame_metadata in capture_records:
+        row_number = int(frame_metadata.get("row", 1))
+        if limit_rows and row_number > limit_rows:
             continue
-        if row_range and not (row_range[0] <= row <= row_range[1]):
+        if row_range and not (row_range[0] <= row_number <= row_range[1]):
             continue
-        st = int(d.get("station", 0))
-        if station_range and not (station_range[0] <= st <= station_range[1]):
+        station_number = int(frame_metadata.get("station", 0))
+        if station_range and not (station_range[0] <= station_number <= station_range[1]):
             continue
-        col = int(d.get("col", 0))
-        if col_range and not (col_range[0] <= col <= col_range[1]):
+        column_index = int(frame_metadata.get("col", 0))
+        if col_range and not (col_range[0] <= column_index <= col_range[1]):
             continue
-        s1, s2 = d.get("sensor1_mm"), d.get("sensor2_mm")
-        in1, in2 = d.get("sensor1_in_range", True), d.get("sensor2_in_range", True)
-        vals = [s for s, ok in ((s1, in1), (s2, in2)) if s is not None and ok]
-        standoff = float(np.mean(vals)) if vals else float(d.get("target_mm", 110.0))
+        sensor1_mm, sensor2_mm = frame_metadata.get("sensor1_mm"), frame_metadata.get("sensor2_mm")
+        sensor1_in_range = frame_metadata.get("sensor1_in_range", True)
+        sensor2_in_range = frame_metadata.get("sensor2_in_range", True)
+        sensor_readings = [
+            reading
+            for reading, in_range in (
+                (sensor1_mm, sensor1_in_range), (sensor2_mm, sensor2_in_range)
+            )
+            if reading is not None and in_range
+        ]
+        standoff = float(np.mean(sensor_readings)) if sensor_readings else float(frame_metadata.get("target_mm", 110.0))
         frames.append(
             Frame(
                 idx=len(frames),
-                station=int(d.get("station", len(frames))),
-                row=row,
-                col=int(d.get("col", 0)),
-                phase=str(d.get("phase", "+y")),
-                sidecar=sc,
-                image_path=cand,
-                g=np.array([float(d["x_mm"]), float(d["y_mm"]), float(d["z_mm"])]),
-                rx=float(d["rx_rad"]),
+                station=int(frame_metadata.get("station", len(frames))),
+                row=row_number,
+                col=int(frame_metadata.get("col", 0)),
+                phase=str(frame_metadata.get("phase", "+y")),
+                sidecar=sidecar_path,
+                image_path=image_path,
+                g=np.array([float(frame_metadata["x_mm"]), float(frame_metadata["y_mm"]), float(frame_metadata["z_mm"])]),
+                rx=float(frame_metadata["rx_rad"]),
                 standoff=standoff,
-                settled=bool(d.get("settled", True)),
+                settled=bool(frame_metadata.get("settled", True)),
                 sensor_mm={
-                    "sensor1": s1 if (s1 is not None and in1) else None,
-                    "sensor2": s2 if (s2 is not None and in2) else None,
+                    "sensor1": sensor1_mm if (sensor1_mm is not None and sensor1_in_range) else None,
+                    "sensor2": sensor2_mm if (sensor2_mm is not None and sensor2_in_range) else None,
                 },
             )
         )
@@ -184,15 +224,15 @@ def _extract_camera_frame_sift_keypoints(path: str, downscale: int, nfeatures: i
     im = cv2.imread(path, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
     if im is None:
         raise RuntimeError(f"could not read {path}")
-    g = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
+    gauge = cv2.cvtColor(im, cv2.COLOR_BGR2GRAY)
     if downscale != 1:
-        g = cv2.resize(g, None, fx=1 / downscale, fy=1 / downscale, interpolation=cv2.INTER_AREA)
+        gauge = cv2.resize(gauge, None, fx=1 / downscale, fy=1 / downscale, interpolation=cv2.INTER_AREA)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
-    g = clahe.apply(g)
+    gauge = clahe.apply(gauge)
     sift = cv2.SIFT_create(nfeatures=nfeatures, contrastThreshold=0.008, edgeThreshold=20)
-    kp, des = sift.detectAndCompute(g, None)
-    pts = np.float32([k.pt for k in kp])
-    return pts, des, g.shape
+    kp, des = sift.detectAndCompute(gauge, None)
+    pts = np.float32([item_index.pt for item_index in kp])
+    return pts, des, gauge.shape
 
 
 def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfeatures: int) -> None:
@@ -250,7 +290,7 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
                 "MKL_NUM_THREADS": "1",
                 "MALLOC_ARENA_MAX": "2",
             }
-            saved_env = {k: os.environ.get(k) for k in one_thread}
+            saved_env = {item_index: os.environ.get(item_index) for item_index in one_thread}
             os.environ.update(one_thread)
             try:
                 with cf.ProcessPoolExecutor(
@@ -259,7 +299,7 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
                     results = list(
                         ex.map(
                             _extract_camera_frame_sift_keypoints,
-                            [f.image_path for f in frames],
+                            [frame.image_path for frame in frames],
                             [downscale] * len(frames),
                             [nfeatures] * len(frames),
                             [budget] * len(frames),
@@ -267,32 +307,32 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
                         )
                     )
             finally:
-                for k, v in saved_env.items():
-                    if v is None:
-                        os.environ.pop(k, None)
+                for item_index, texture_v in saved_env.items():
+                    if texture_v is None:
+                        os.environ.pop(item_index, None)
                     else:
-                        os.environ[k] = v
-        except Exception as e:  # pool unavailable: go serial
-            print(f"  ! extract_camera_frame_sift_keypoints pool failed ({e}); extracting serially")
+                        os.environ[item_index] = texture_v
+        except Exception as caught_exception:  # pool unavailable: go serial
+            print(f"  ! extract_camera_frame_sift_keypoints pool failed ({caught_exception}); extracting serially")
             results = None
     if results is None:
-        results = [_extract_camera_frame_sift_keypoints(f.image_path, downscale, nfeatures) for f in frames]
-    for f, (pts, des, shape) in zip(frames, results):
-        f.gray = None  # unused downstream; skip the RAM
-        f.shape = shape
-        f.kp = [_KPt(tuple(p)) for p in pts]
-        f.des = des
-        if f.idx % 20 == 0 or f.idx == len(frames) - 1:
+        results = [_extract_camera_frame_sift_keypoints(frame.image_path, downscale, nfeatures) for frame in frames]
+    for frame, (pts, des, shape) in zip(frames, results):
+        frame.gray = None  # unused downstream; skip the RAM
+        frame.shape = shape
+        frame.kp = [_KPt(tuple(point)) for point in pts]
+        frame.des = des
+        if frame.idx % 20 == 0 or frame.idx == len(frames) - 1:
             print(
-                f"  frame {f.idx:>3}/{len(frames)}: {shape[1]}x{shape[0]}, "
-                f"{len(f.kp)} kp  ({time.time() - t0:.0f}s)"
+                f"  frame {frame.idx:>3}/{len(frames)}: {shape[1]}x{shape[0]}, "
+                f"{len(frame.kp)} kp  ({time.time() - t0:.0f}s)"
             )
 
 
-@dataclass
+@dataclass(init=False)
 class Pair:
-    i: int
-    j: int
+    index: int
+    neighbor_index: int
     n_good: int
     n_inlier: int
     tx: float  # affine translation i->j, downscaled px
@@ -304,6 +344,35 @@ class Pair:
     src_kp: np.ndarray  # keypoint indices in frame i (for track building)
     dst_kp: np.ndarray
 
+    def __init__(self, *positional_values, **pair_values):
+        # Keep the original pair endpoint keywords available to callers.
+        for legacy_name, descriptive_name in (("i", "index"), ("j", "neighbor_index")):
+            if legacy_name in pair_values:
+                if descriptive_name in pair_values:
+                    raise TypeError(f"Pair received both {legacy_name!r} and {descriptive_name!r}")
+                pair_values[descriptive_name] = pair_values.pop(legacy_name)
+        pair_fields = fields(type(self))
+        if len(positional_values) > len(pair_fields):
+            raise TypeError("Pair received too many positional arguments")
+        for pair_field, field_value in zip(pair_fields, positional_values):
+            if pair_field.name in pair_values:
+                raise TypeError(f"Pair received multiple values for {pair_field.name!r}")
+            pair_values[pair_field.name] = field_value
+        for pair_field in pair_fields:
+            if pair_field.name not in pair_values:
+                raise TypeError(f"Pair is missing required field {pair_field.name!r}")
+            setattr(self, pair_field.name, pair_values.pop(pair_field.name))
+        if pair_values:
+            unexpected_field = next(iter(pair_values))
+            raise TypeError(f"Pair got an unexpected keyword argument {unexpected_field!r}")
+
+    def __getattr__(self, field_name):
+        if field_name == "i":
+            return self.index
+        if field_name == "j":
+            return self.neighbor_index
+        raise AttributeError(field_name)
+
 
 def _create_feature_matching_flann_index():
     return cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=64))
@@ -312,53 +381,77 @@ def _create_feature_matching_flann_index():
 _GPU_MATCHER = None  # set by main() when --device cuda
 
 
-def configure_gpu_feature_matcher(m) -> None:
+def configure_gpu_feature_matcher(mask) -> None:
     global _GPU_MATCHER
-    _GPU_MATCHER = m
+    _GPU_MATCHER = mask
 
 
 def match_camera_frame_pair_keypoints(
-    fi: Frame, fj: Frame, ratio: float, min_inliers: int, prior_xy=None, prior_tol: float = 0.0
+    source_frame: Frame,
+    target_frame: Frame,
+    ratio: float,
+    min_inliers: int,
+    prior_xy=None,
+    prior_tol: float = 0.0,
 ) -> Pair | None:
-    if fi.des is None or fj.des is None or len(fi.kp) < 2 or len(fj.kp) < 2:
+    if source_frame.des is None or target_frame.des is None or len(source_frame.kp) < 2 or len(target_frame.kp) < 2:
         return None
     if _GPU_MATCHER is not None:
-        d1, d2, nn1 = _GPU_MATCHER.knn2(fi.idx, fi.des, fj.idx, fj.des)
-        k1i = np.where(d1 < ratio * d2)[0].astype(np.int32)
-        k2i = nn1[k1i].astype(np.int32)
+        nearest_distances, second_nearest_distances, nearest_neighbor_indices = _GPU_MATCHER.knn2(
+            source_frame.idx, source_frame.des, target_frame.idx, target_frame.des
+        )
+        source_keypoint_indices = np.where(nearest_distances < ratio * second_nearest_distances)[0].astype(np.int32)
+        target_keypoint_indices = nearest_neighbor_indices[source_keypoint_indices].astype(np.int32)
     else:
-        knn = _create_feature_matching_flann_index().knnMatch(fi.des, fj.des, k=2)
-        good = [m for m, n in (p for p in knn if len(p) == 2) if m.distance < ratio * n.distance]
-        k1i = np.int32([m.queryIdx for m in good])
-        k2i = np.int32([m.trainIdx for m in good])
-    if len(k1i) < min_inliers:
+        neighbor_matches = _create_feature_matching_flann_index().knnMatch(source_frame.des, target_frame.des, k=2)
+        good_matches = [
+            first_match
+            for first_match, second_match in neighbor_matches
+            if first_match.distance < ratio * second_match.distance
+        ]
+        source_keypoint_indices = np.int32([match.queryIdx for match in good_matches])
+        target_keypoint_indices = np.int32([match.trainIdx for match in good_matches])
+    if len(source_keypoint_indices) < min_inliers:
         return None
-    p1 = np.float32([fi.kp[q].pt for q in k1i])
-    p2 = np.float32([fj.kp[t].pt for t in k2i])
-    if prior_xy is not None and prior_tol > 0:
-        d = p2 - p1
-        keep = np.hypot(d[:, 0] - prior_xy[0], d[:, 1] - prior_xy[1]) < prior_tol
-        if keep.sum() >= min_inliers:
-            p1, p2, k1i, k2i = p1[keep], p2[keep], k1i[keep], k2i[keep]
-    M, inl = cv2.estimateAffinePartial2D(
-        p1, p2, method=cv2.RANSAC, ransacReprojThreshold=4, maxIters=5000, confidence=0.999
+    source_image_points = np.float32(
+        [source_frame.kp[keypoint_index].pt for keypoint_index in source_keypoint_indices]
     )
-    if M is None or inl is None:
+    target_image_points = np.float32(
+        [target_frame.kp[keypoint_index].pt for keypoint_index in target_keypoint_indices]
+    )
+    if prior_xy is not None and prior_tol > 0:
+        observed_translations = target_image_points - source_image_points
+        within_translation_prior = (
+            np.hypot(
+                observed_translations[:, 0] - prior_xy[0],
+                observed_translations[:, 1] - prior_xy[1],
+            )
+            < prior_tol
+        )
+        if within_translation_prior.sum() >= min_inliers:
+            source_image_points = source_image_points[within_translation_prior]
+            target_image_points = target_image_points[within_translation_prior]
+            source_keypoint_indices = source_keypoint_indices[within_translation_prior]
+            target_keypoint_indices = target_keypoint_indices[within_translation_prior]
+    affine_transform, inlier_mask = cv2.estimateAffinePartial2D(
+        source_image_points, target_image_points, method=cv2.RANSAC, ransacReprojThreshold=4, maxIters=5000, confidence=0.999
+    )
+    if affine_transform is None or inlier_mask is None:
         return None
-    inl = inl.ravel().astype(bool)
-    if int(inl.sum()) < min_inliers:
+    inlier_mask = inlier_mask.ravel().astype(bool)
+    if int(inlier_mask.sum()) < min_inliers:
         return None
     return Pair(
-        i=fi.idx,
-        j=fj.idx,
-        n_good=len(p1),
-        n_inlier=int(inl.sum()),
-        tx=float(M[0, 2]),
-        ty=float(M[1, 2]),
-        rot_deg=math.degrees(math.atan2(M[1, 0], M[0, 0])),
-        scale=float(math.hypot(M[0, 0], M[1, 0])),
-        src=p1[inl],
-        dst=p2[inl],
-        src_kp=k1i[inl],
-        dst_kp=k2i[inl],
+        i=source_frame.idx,
+        j=target_frame.idx,
+        n_good=len(source_image_points),
+        n_inlier=int(inlier_mask.sum()),
+        tx=float(affine_transform[0, 2]),
+        ty=float(affine_transform[1, 2]),
+        rot_deg=math.degrees(math.atan2(affine_transform[1, 0], affine_transform[0, 0])),
+        scale=float(math.hypot(affine_transform[0, 0], affine_transform[1, 0])),
+        src=source_image_points[inlier_mask],
+        dst=target_image_points[inlier_mask],
+        src_kp=source_keypoint_indices[inlier_mask],
+        dst_kp=target_keypoint_indices[inlier_mask],
     )

@@ -20,12 +20,12 @@ from ..registration_texture import estimate_camera_frame_texture_gains, render_s
 
 def reconstruct_surface_from_camera_frames(args, problem):
     """Run bundle adjustment, reject outliers, fit the surface, and render."""
-    out_dir = problem.out_dir
+    output_directory = problem.out_dir
     frames = problem.frames
     pairs = problem.pairs
-    mdl = problem.mdl
-    R0 = problem.R0
-    C0 = problem.C0
+    rig_model = problem.mdl
+    prior_camera_rotations = problem.R0
+    prior_camera_centers = problem.C0
     frame_group = None
     if args.group_by_row:
         # group by (row, y-sweep phase), not row alone: a contour scan's -y
@@ -37,10 +37,10 @@ def reconstruct_surface_from_camera_frames(args, problem):
         # A band-order scan (phase '+x'/'-x': x is the fast axis) is the
         # transpose -- there the breathing-coherent unit (frames seconds apart)
         # is the BAND (col); same-row frames sit minutes apart across bands.
-        if any(f.phase in ("+x", "-x") for f in frames):
-            frame_group = {f.idx: 2 * f.col + (1 if f.phase == "-x" else 0) for f in frames}
+        if any(frame.phase in ("+x", "-x") for frame in frames):
+            frame_group = {frame.idx: 2 * frame.col + (1 if frame.phase == "-x" else 0) for frame in frames}
         else:
-            frame_group = {f.idx: 2 * f.row + (1 if f.phase == "-y" else 0) for f in frames}
+            frame_group = {frame.idx: 2 * frame.row + (1 if frame.phase == "-y" else 0) for frame in frames}
     if frame_group is not None and args.group_ba == "group":
         if not args.rig_from:
             print(
@@ -48,26 +48,26 @@ def reconstruct_surface_from_camera_frames(args, problem):
                 "can't fit the rig model); proceeding with the global rig"
             )
         print("[6/9] 3D bundle adjustment (per-row groups + inter-group align)")
-        ba = bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args, frame_group)
+        bundle_adjustment_result = bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_model, prior_camera_rotations, prior_camera_centers, args, frame_group)
     else:
         # global BA; frame_group (if any) still drives the render-side group
         # ownership/LF gates, which don't need per-group pose solves
         print("[6/9] 3D bundle adjustment (alternating triangulate_3d_feature_tracks/resect)")
-        ba = bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args)
-    R, C, X = ba["R"], ba["C"], ba["X"]
+        bundle_adjustment_result = bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, prior_camera_rotations, prior_camera_centers, args)
+    camera_rotations, camera_centers, landmark_points = bundle_adjustment_result["R"], bundle_adjustment_result["C"], bundle_adjustment_result["X"]
 
     # pose deviation from the (re-anchored) proprioception prior
-    R0, C0 = mdl.poses(frames)
-    dt = np.linalg.norm(C - C0, axis=1)
-    dr = np.array(
+    prior_camera_rotations, prior_camera_centers = rig_model.poses(frames)
+    position_deviations_mm = np.linalg.norm(camera_centers - prior_camera_centers, axis=1)
+    rotation_deviations_deg = np.array(
         [
-            np.degrees(np.linalg.norm(Rotation.from_matrix(R0[i].T @ R[i]).as_rotvec()))
-            for i in range(len(frames))
+            np.degrees(np.linalg.norm(Rotation.from_matrix(prior_camera_rotations[index].T @ camera_rotations[index]).as_rotvec()))
+            for index in range(len(frames))
         ]
     )
     print(
-        f"      pose deviation from prior: |dt| median {np.median(dt):.2f}mm "
-        f"max {dt.max():.2f}mm; |dr| median {np.median(dr):.2f}deg max {dr.max():.2f}deg"
+        f"      pose deviation from prior: |dt| median {np.median(position_deviations_mm):.2f}mm "
+        f"max {position_deviations_mm.max():.2f}mm; |dr| median {np.median(rotation_deviations_deg):.2f}deg max {rotation_deviations_deg.max():.2f}deg"
     )
 
     # --- reject gross-outlier frames -----------------------------------------
@@ -80,183 +80,183 @@ def reconstruct_surface_from_camera_frames(args, problem):
     # otherwise a couple of bad frames bend the subject surface into a spike
     # and smear the ortho-texture.
     if args.reject_pose_mm > 0 or args.reject_rot_deg > 0:
-        bad = np.zeros(len(frames), bool)
+        outlier_frame_mask = np.zeros(len(frames), bool)
         if args.reject_pose_mm > 0:
-            bad |= dt > args.reject_pose_mm
+            outlier_frame_mask |= position_deviations_mm > args.reject_pose_mm
         if args.reject_rot_deg > 0:
-            bad |= dr > args.reject_rot_deg
-        if bad.any():
-            bad_idx = np.where(bad)[0]
-            for i in bad_idx:
-                R[i], C[i] = R0[i].copy(), C0[i].copy()  # trust the gantry
-            bad_set = set(int(i) for i in bad_idx)
-            keep = np.array([int(fi) not in bad_set for fi in ba["obs_frame"]], dtype=bool)
-            for k in ("obs_frame", "obs_uv", "obs_track"):
-                ba[k] = ba[k][keep]
+            outlier_frame_mask |= rotation_deviations_deg > args.reject_rot_deg
+        if outlier_frame_mask.any():
+            outlier_frame_indices = np.where(outlier_frame_mask)[0]
+            for index in outlier_frame_indices:
+                camera_rotations[index], camera_centers[index] = prior_camera_rotations[index].copy(), prior_camera_centers[index].copy()  # trust the gantry
+            outlier_frame_index_set = set(int(index) for index in outlier_frame_indices)
+            retained_observation_mask = np.array([int(observation_frame_index) not in outlier_frame_index_set for observation_frame_index in bundle_adjustment_result["obs_frame"]], dtype=bool)
+            for item_index in ("obs_frame", "obs_uv", "obs_track"):
+                bundle_adjustment_result[item_index] = bundle_adjustment_result[item_index][retained_observation_mask]
             # re-triangulate_3d_feature_tracks landmarks that still have >=2 trustworthy views;
             # keep the old position for the rest (they are dropped later by the
             # >=3-obs surface-fit gate, but must stay finite for the bounds calc).
-            Xr = triangulate_3d_feature_tracks(ba["obs_frame"], ba["obs_uv"], ba["obs_track"], len(X), R, C, mdl)
-            nobs_g = np.bincount(ba["obs_track"], minlength=len(X))
-            ok = (nobs_g >= 2) & np.isfinite(Xr).all(1)
-            X = np.where(ok[:, None], Xr, X)
-            ba["X"] = X
+            retriangulated_landmark_points = triangulate_3d_feature_tracks(bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], bundle_adjustment_result["obs_track"], len(landmark_points), camera_rotations, camera_centers, rig_model)
+            observation_count_by_landmark = np.bincount(bundle_adjustment_result["obs_track"], minlength=len(landmark_points))
+            landmark_retriangulation_valid = (observation_count_by_landmark >= 2) & np.isfinite(retriangulated_landmark_points).all(1)
+            landmark_points = np.where(landmark_retriangulation_valid[:, None], retriangulated_landmark_points, landmark_points)
+            bundle_adjustment_result["X"] = landmark_points
             print(
-                f"      ! rejected {len(bad_idx)} gross-outlier frame(s) "
+                f"      ! rejected {len(outlier_frame_indices)} gross-outlier frame(s) "
                 f"(>{args.reject_pose_mm:.0f}mm or >{args.reject_rot_deg:.0f}deg "
-                f"off gantry): {sorted(bad_set)} -> snapped to proprioception, "
-                f"{int((~keep).sum())} obs dropped, {int(ok.sum())} landmarks "
+                f"off gantry): {sorted(outlier_frame_index_set)} -> snapped to proprioception, "
+                f"{int((~retained_observation_mask).sum())} obs dropped, {int(landmark_retriangulation_valid.sum())} landmarks "
                 f"re-triangulated"
             )
 
     # standoff sensor agreement
-    err, zc = compute_feature_track_reprojection_errors(X, ba["obs_frame"], ba["obs_uv"], ba["obs_track"], R, C, mdl)
-    zc_per = np.full(len(frames), np.nan)
-    for f in frames:
-        m = ba["obs_frame"] == f.idx
-        if m.sum() > 10:
-            zc_per[f.idx] = np.median(zc[m])
-    so = np.array([f.standoff for f in frames])
-    ok = ~np.isnan(zc_per)
-    dzfit = float(np.median(zc_per[ok] - so[ok]))
-    so_rms = float(np.sqrt(np.mean((zc_per[ok] - so[ok] - dzfit) ** 2)))
-    print(f"      standoff sensors vs recovered depth: offset {dzfit:+.1f}mm, rms {so_rms:.2f}mm")
+    reprojection_errors, camera_depths = compute_feature_track_reprojection_errors(landmark_points, bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], bundle_adjustment_result["obs_track"], camera_rotations, camera_centers, rig_model)
+    median_depth_by_frame = np.full(len(frames), np.nan)
+    for frame in frames:
+        mask = bundle_adjustment_result["obs_frame"] == frame.idx
+        if mask.sum() > 10:
+            median_depth_by_frame[frame.idx] = np.median(camera_depths[mask])
+    standoff_readings = np.array([frame.standoff for frame in frames])
+    landmark_retriangulation_valid = ~np.isnan(median_depth_by_frame)
+    standoff_depth_offset = float(np.median(median_depth_by_frame[landmark_retriangulation_valid] - standoff_readings[landmark_retriangulation_valid]))
+    standoff_depth_rmse = float(np.sqrt(np.mean((median_depth_by_frame[landmark_retriangulation_valid] - standoff_readings[landmark_retriangulation_valid] - standoff_depth_offset) ** 2)))
+    print(f"      standoff sensors vs recovered depth: offset {standoff_depth_offset:+.1f}mm, rms {standoff_depth_rmse:.2f}mm")
 
     # settled vs unsettled
-    med_err = np.full(len(frames), np.nan)
-    for f in frames:
-        m = ba["obs_frame"] == f.idx
-        if m.sum():
-            med_err[f.idx] = np.median(err[m])
-    settled = np.array([f.settled for f in frames])
+    median_reprojection_error_by_frame = np.full(len(frames), np.nan)
+    for frame in frames:
+        mask = bundle_adjustment_result["obs_frame"] == frame.idx
+        if mask.sum():
+            median_reprojection_error_by_frame[frame.idx] = np.median(reprojection_errors[mask])
+    settled = np.array([frame.settled for frame in frames])
     msg_settle = ""
     if settled.any() and (~settled).any():
-        a = np.nanmedian(med_err[settled])
-        b = np.nanmedian(med_err[~settled])
-        msg_settle = f"median reproj: settled {a:.2f}px vs unsettled {b:.2f}px"
+        settled_median_error = np.nanmedian(median_reprojection_error_by_frame[settled])
+        unsettled_median_error = np.nanmedian(median_reprojection_error_by_frame[~settled])
+        msg_settle = f"median reproj: settled {settled_median_error:.2f}px vs unsettled {unsettled_median_error:.2f}px"
         print(f"      {msg_settle}")
 
     print("[7/9] fitting surface heightfield")
     # orient: does +z normal face the cameras?
-    up_sign = 1.0 if (C[:, 2].mean() > np.median(X[:, 2])) else -1.0
+    surface_normal_sign = 1.0 if (camera_centers[:, 2].mean() > np.median(landmark_points[:, 2])) else -1.0
     # Auto contour metric: a strongly curved subject scanned with the rig tilting
     # to follow the surface has a wide RX spread. Surface RMS provides an
     # independent confirmation. The gate only changes surface smoothing, so the
     # bounds and landmark selection remain identical.
-    rx_all = np.array([f.rx for f in frames])
-    rx_spread = float(np.degrees(rx_all.max() - rx_all.min()))
+    frame_x_rotation_angles = np.array([frame.rx for frame in frames])
+    frame_x_rotation_spread_deg = float(np.degrees(frame_x_rotation_angles.max() - frame_x_rotation_angles.min()))
     # robust bounds + well-supported landmarks only: a handful of blown-up
     # tracks must not inflate the grid (oscillating extrapolation wrecks the
     # arc-length parameterisation downstream)
-    qx = np.percentile(X[:, 0], [0.5, 99.5])
-    qy = np.percentile(X[:, 1], [0.5, 99.5])
-    bx0, bx1 = qx[0] - 8, qx[1] + 8
-    by0, by1 = qy[0] - 8, qy[1] + 8
-    nobs_track = np.bincount(ba["obs_track"], minlength=len(X))
-    w_track = np.clip(nobs_track - 1, 1, 8).astype(float)
-    sel = (X[:, 0] >= bx0) & (X[:, 0] <= bx1) & (X[:, 1] >= by0) & (X[:, 1] <= by1)
-    strong = nobs_track >= 3
-    if (sel & strong).mean() > 0.3:
-        sel &= strong
+    landmark_x_percentiles = np.percentile(landmark_points[:, 0], [0.5, 99.5])
+    landmark_y_percentiles = np.percentile(landmark_points[:, 1], [0.5, 99.5])
+    landmark_x_min, landmark_x_max = landmark_x_percentiles[0] - 8, landmark_x_percentiles[1] + 8
+    landmark_y_min, landmark_y_max = landmark_y_percentiles[0] - 8, landmark_y_percentiles[1] + 8
+    observation_count_by_landmark = np.bincount(bundle_adjustment_result["obs_track"], minlength=len(landmark_points))
+    landmark_surface_fit_weights = np.clip(observation_count_by_landmark - 1, 1, 8).astype(float)
+    surface_fit_landmark_mask = (landmark_points[:, 0] >= landmark_x_min) & (landmark_points[:, 0] <= landmark_x_max) & (landmark_points[:, 1] >= landmark_y_min) & (landmark_points[:, 1] <= landmark_y_max)
+    well_observed_landmark_mask = observation_count_by_landmark >= 3
+    if (surface_fit_landmark_mask & well_observed_landmark_mask).mean() > 0.3:
+        surface_fit_landmark_mask &= well_observed_landmark_mask
     print(
-        f"      using {sel.sum()}/{len(X)} landmarks "
-        f"(robust bounds x[{bx0:.0f},{bx1:.0f}] y[{by0:.0f},{by1:.0f}], "
+        f"      using {surface_fit_landmark_mask.sum()}/{len(landmark_points)} landmarks "
+        f"(robust bounds x[{landmark_x_min:.0f},{landmark_x_max:.0f}] y[{landmark_y_min:.0f},{landmark_y_max:.0f}], "
         f">=3-obs tracks)"
     )
-    surf, surf_rms = fit_surface_heightfield(
-        X[sel], (bx0, bx1, by0, by1), args.surface_pitch, args.surface_smooth, w0=w_track[sel]
+    fitted_surface, surface_fit_rms = fit_surface_heightfield(
+        landmark_points[surface_fit_landmark_mask], (landmark_x_min, landmark_x_max, landmark_y_min, landmark_y_max), args.surface_pitch, args.surface_smooth, initial_landmark_weights=landmark_surface_fit_weights[surface_fit_landmark_mask]
     )
     # Finalize the contour gate from both RX spread and landmark-surface RMS so
     # isolated noisy landmarks cannot enable it on their own.
-    contour = (args.contour == "on") or (
+    contour_smoothing_enabled = (args.contour == "on") or (
         args.contour == "auto"
-        and rx_spread > args.contour_rx_thresh_deg
-        and surf_rms > args.contour_rms_thresh
+        and frame_x_rotation_spread_deg > args.contour_rx_thresh_deg
+        and surface_fit_rms > args.contour_rms_thresh
     )
-    if contour:
+    if contour_smoothing_enabled:
         # Refit with stronger smoothing so depth noise and breathing do not turn
         # the broad measured contour into sharp peaks and valleys.
-        surf, _ = fit_surface_heightfield(
-            X[sel], (bx0, bx1, by0, by1), args.surface_pitch, args.contour_smooth, w0=w_track[sel]
+        fitted_surface, contour_fit_rms = fit_surface_heightfield(
+            landmark_points[surface_fit_landmark_mask], (landmark_x_min, landmark_x_max, landmark_y_min, landmark_y_max), args.surface_pitch, args.contour_smooth, initial_landmark_weights=landmark_surface_fit_weights[surface_fit_landmark_mask]
         )
         print(
-            f"      [contour] enabled (RX spread {rx_spread:.0f}deg, surface RMS "
-            f"{surf_rms:.0f}mm): landmark surface smoothing="
+            f"      [contour] enabled (RX spread {frame_x_rotation_spread_deg:.0f}deg, surface RMS "
+            f"{surface_fit_rms:.0f}mm): landmark surface smoothing="
             f"{args.contour_smooth:.0f}"
         )
-    tp = TexParam(surf, mdl.base_R, mdl.base_t)
+    texture_parameters = TexParam(fitted_surface, rig_model.base_R, rig_model.base_t)
 
-    warp = None
+    frame_deformation_warps = None
     if args.deformable:
         print("      deformable alignment (smooth per-frame map warp)")
-        warp = align_frames_with_deformable_surface_warps(
-            frames, pairs, R, C, mdl, surf, tp, reg=args.deformable_reg, order=args.deformable_order
+        frame_deformation_warps = align_frames_with_deformable_surface_warps(
+            frames, pairs, camera_rotations, camera_centers, rig_model, fitted_surface, texture_parameters, reg=args.deformable_reg, order=args.deformable_order
         )
 
-    frame_gain = None
+    frame_texture_gains = None
     if args.lf_gain != "off":
-        frame_gain = estimate_camera_frame_texture_gains(
+        frame_texture_gains = estimate_camera_frame_texture_gains(
             frames,
-            mdl,
-            ba["obs_frame"],
-            ba["obs_uv"],
-            ba["obs_track"],
-            ba.get("err"),
+            rig_model,
+            bundle_adjustment_result["obs_frame"],
+            bundle_adjustment_result["obs_uv"],
+            bundle_adjustment_result["obs_track"],
+            bundle_adjustment_result.get("err"),
             mode=args.lf_gain,
         )
 
     print("[8/9] rendering ortho-texture")
-    tex, wacc, tex_bounds = render_surface_texture(
+    rendered_texture, texture_accumulation_weights, texture_bounds = render_surface_texture(
         frames,
-        R,
-        C,
-        mdl,
-        surf,
-        tp,
+        camera_rotations,
+        camera_centers,
+        rig_model,
+        fitted_surface,
+        texture_parameters,
         args.texture_ppmm,
-        up_sign,
-        out_dir,
+        surface_normal_sign,
+        output_directory,
         args.blend_sharpness,
         args.focus_weight,
         args.blend,
         frame_group,
-        warp,
+        frame_deformation_warps,
         args.hf_coherence_mm,
         args.hf_cross_group,
         args.group_feather_mm,
         args.max_incidence_deg,
         device=args.device,
-        frame_gain=frame_gain,
+        frame_gain=frame_texture_gains,
     )
     pos, nrm, uvn, faces = build_surface_mesh(
-        surf,
-        tp,
-        tex_bounds,
-        wacc,
+        fitted_surface,
+        texture_parameters,
+        texture_bounds,
+        texture_accumulation_weights,
         args.texture_ppmm,
         args.mesh_pitch,
-        up_sign,
+        surface_normal_sign,
         tuple(args.mesh_smooth),
     )
     return SimpleNamespace(
-        ba=ba,
-        R=R,
-        C=C,
-        X=X,
-        dt=dt,
-        dr=dr,
-        med_err=med_err,
-        surf=surf,
-        surf_rms=surf_rms,
-        tp=tp,
-        tex=tex,
-        wacc=wacc,
-        tex_bounds=tex_bounds,
+        bundle_adjustment_result=bundle_adjustment_result,
+        R=camera_rotations,
+        C=camera_centers,
+        X=landmark_points,
+        dt=position_deviations_mm,
+        dr=rotation_deviations_deg,
+        med_err=median_reprojection_error_by_frame,
+        surf=fitted_surface,
+        surf_rms=surface_fit_rms,
+        texture_parameters=texture_parameters,
+        tex=rendered_texture,
+        wacc=texture_accumulation_weights,
+        tex_bounds=texture_bounds,
         pos=pos,
         nrm=nrm,
         uvn=uvn,
         faces=faces,
         msg_settle=msg_settle,
-        dzfit=dzfit,
-        so_rms=so_rms,
+        dzfit=standoff_depth_offset,
+        so_rms=standoff_depth_rmse,
     )

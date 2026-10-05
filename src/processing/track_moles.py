@@ -30,9 +30,9 @@ from scipy.interpolate import RBFInterpolator
 # --------------------------------------------------------------------------- #
 # Size & shape measurement (one scan's own un-warped frame)
 # --------------------------------------------------------------------------- #
-def _disk_mask(shape, cx, cy, r):
+def _disk_mask(shape, center_x_px, center_y_px, radius_px):
     yy, xx = np.ogrid[: shape[0], : shape[1]]
-    return (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
+    return (xx - center_x_px) ** 2 + (yy - center_y_px) ** 2 <= radius_px * radius_px
 
 
 def _local_baseline(bump, cov, cx, cy, r_in, r_out, other_mask):
@@ -45,69 +45,69 @@ def _local_baseline(bump, cov, cx, cy, r_in, r_out, other_mask):
     return float(np.median(vals)) if vals.size >= 20 else 0.0
 
 
-def _iso_region(bump, level, cx, cy, ppmm):
+def _iso_region(bump, level, cx, cy, pixels_per_mm):
     """Half-max connected component containing (cx,cy), closed, + its contour."""
     binary = (bump >= level).astype(np.uint8)
-    lab, n = label(binary)
-    if n == 0:
+    lab, item_count = label(binary)
+    if item_count == 0:
         return None, None, 0
     cl = lab[int(round(cy)), int(round(cx))]
     if cl == 0:  # center fell below level
         return None, None, 0
     mask = (lab == cl).astype(np.uint8)
-    k = max(1, int(round(0.2 * ppmm)))
+    item_index = max(1, int(round(0.2 * pixels_per_mm)))
     mask = cv2.morphologyEx(
-        mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k | 1, k | 1))
+        mask, cv2.MORPH_CLOSE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (item_index | 1, item_index | 1))
     )
-    cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    if not cnts:
+    contours, contour_hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
         return mask, None, int(mask.sum())
-    contour = max(cnts, key=cv2.contourArea)
+    contour = max(contours, key=cv2.contourArea)
     return mask, contour, int(mask.sum())
 
 
 def measure_mole_size(
-    mel, cov, mole, ppmm, frac=0.5, presmooth_mm=0.35, peak_disk_mm=0.5, other_moles=None
+    melanin_image, coverage_mask, mole_detection, pixels_per_mm, iso_fraction=0.5, presmoothing_sigma_mm=0.35, peak_core_radius_mm=0.5, other_mole_detections=None
 ):
-    """Half-max iso-contour measurement of one mole in one scan's melanin map.
+    """Half-max iso-contour measurement of one detected mole in one scan's melanin map.
 
-    Returns d_eq_mm, area_mm2, eccentricity, major/minor_mm, border_irregularity,
-    perim_mm, peak, center, plus per-measurement sigmas and a `valid` flag."""
-    radius_mm = max(mole["radius_mm"], 0.3)
-    half = int(math.ceil(max(3 * radius_mm, 4.0) * ppmm))
-    H, W = mel.shape
-    cx0, cy0 = int(round(mole["x"])), int(round(mole["y"]))
-    x0, y0 = cx0 - half, cy0 - half
-    x1, y1 = cx0 + half, cy0 + half
+    Returns equivalent_diameter_mm, region_area_mm2, eccentricity, major/minor_axis_length_mm, border_irregularity,
+    region_perimeter_mm, peak, center, plus per-measurement sigmas and a `measurement_valid` flag."""
+    mole_radius_mm = max(mole_detection["radius_mm"], 0.3)
+    crop_half_size_px = int(math.ceil(max(3 * mole_radius_mm, 4.0) * pixels_per_mm))
+    image_height, image_width = melanin_image.shape
+    mole_pixel_x, mole_pixel_y = int(round(mole_detection["x"])), int(round(mole_detection["y"]))
+    x0, y0 = mole_pixel_x - crop_half_size_px, mole_pixel_y - crop_half_size_px
+    x1, y1 = mole_pixel_x + crop_half_size_px, mole_pixel_y + crop_half_size_px
     pad_l, pad_t = max(0, -x0), max(0, -y0)
-    sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(W, x1), min(H, y1)
-    sz = 2 * half
+    sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(image_width, x1), min(image_height, y1)
+    sz = 2 * crop_half_size_px
     patch = np.zeros((sz, sz), np.float32)
-    pc = np.zeros((sz, sz), np.uint8)
-    patch[pad_t : pad_t + (sy1 - sy0), pad_l : pad_l + (sx1 - sx0)] = mel[sy0:sy1, sx0:sx1]
-    pc[pad_t : pad_t + (sy1 - sy0), pad_l : pad_l + (sx1 - sx0)] = cov[sy0:sy1, sx0:sx1]
-    cx, cy = half, half  # mole center in patch coords
+    patch_coverage = np.zeros((sz, sz), np.uint8)
+    patch[pad_t : pad_t + (sy1 - sy0), pad_l : pad_l + (sx1 - sx0)] = melanin_image[sy0:sy1, sx0:sx1]
+    patch_coverage[pad_t : pad_t + (sy1 - sy0), pad_l : pad_l + (sx1 - sx0)] = coverage_mask[sy0:sy1, sx0:sx1]
+    patch_center_x, patch_center_y = crop_half_size_px, crop_half_size_px  # mole center in patch coordinates
 
     # mask out OTHER moles inside the patch (so baseline/region don't merge them)
-    other_mask = np.zeros((sz, sz), bool)
-    if other_moles:
-        for o in other_moles:
-            if o is mole:
+    other_mole_exclusion_mask = np.zeros((sz, sz), bool)
+    if other_mole_detections:
+        for other_mole in other_mole_detections:
+            if other_mole is mole_detection:
                 continue
-            ox, oy = o["x"] - x0, o["y"] - y0
-            if -half < ox < sz + half and -half < oy < sz + half:
-                other_mask |= _disk_mask((sz, sz), ox, oy, max(o["radius_mm"], 0.3) * ppmm * 1.5)
+            other_mole_patch_x, other_mole_patch_y = other_mole["x"] - x0, other_mole["y"] - y0
+            if -crop_half_size_px < other_mole_patch_x < sz + crop_half_size_px and -crop_half_size_px < other_mole_patch_y < sz + crop_half_size_px:
+                other_mole_exclusion_mask |= _disk_mask((sz, sz), other_mole_patch_x, other_mole_patch_y, max(other_mole["radius_mm"], 0.3) * pixels_per_mm * 1.5)
 
-    r_in, r_out = 2.0 * radius_mm * ppmm, half
-    b0 = _local_baseline(patch, pc, cx, cy, r_in, r_out, other_mask)
-    bump = gaussian_filter(patch - b0, presmooth_mm * ppmm)
+    baseline_inner_radius_px, baseline_outer_radius_px = 2.0 * mole_radius_mm * pixels_per_mm, crop_half_size_px
+    baseline_melanin_value = _local_baseline(patch, patch_coverage, patch_center_x, patch_center_y, baseline_inner_radius_px, baseline_outer_radius_px, other_mole_exclusion_mask)
+    contrast_bump = gaussian_filter(patch - baseline_melanin_value, presmoothing_sigma_mm * pixels_per_mm)
 
-    # robust peak in a small disk at the LoG center; refine center on the core
-    pk_disk = _disk_mask((sz, sz), cx, cy, peak_disk_mm * ppmm)
-    P = float(np.percentile(bump[pk_disk], 95)) if pk_disk.any() else float(bump.max())
-    res = dict(
+    # robust peak in a small disk at the LoG center; refine the center using the core mask
+    peak_core_mask = _disk_mask((sz, sz), patch_center_x, patch_center_y, peak_core_radius_mm * pixels_per_mm)
+    peak_contrast = float(np.percentile(contrast_bump[peak_core_mask], 95)) if peak_core_mask.any() else float(contrast_bump.max())
+    measurement_result = dict(
         valid=False,
-        peak=P,
+        peak=peak_contrast,
         d_eq_mm=float("nan"),
         area_mm2=float("nan"),
         eccentricity=float("nan"),
@@ -115,7 +115,7 @@ def measure_mole_size(
         minor_mm=float("nan"),
         border_irregularity=float("nan"),
         perim_mm=float("nan"),
-        center=(cx0, cy0),
+        center=(mole_pixel_x, mole_pixel_y),
         sigma_diam_meas=float("nan"),
         sigma_area_meas=float("nan"),
         sigma_m=float("nan"),
@@ -123,79 +123,79 @@ def measure_mole_size(
         n_pixels=0,
         reason="",
     )
-    if not np.isfinite(P) or P <= 0:
-        res["reason"] = "non-positive peak"
-        return res
-    core = (bump >= 0.7 * P) & _disk_mask((sz, sz), cx, cy, max(3 * radius_mm * ppmm, half))
-    if core.sum() >= 3:
-        yy, xx = np.nonzero(core)
-        cx, cy = float(xx.mean()), float(yy.mean())
+    if not np.isfinite(peak_contrast) or peak_contrast <= 0:
+        measurement_result["reason"] = "non-positive peak"
+        return measurement_result
+    core_mask = (contrast_bump >= 0.7 * peak_contrast) & _disk_mask((sz, sz), patch_center_x, patch_center_y, max(3 * mole_radius_mm * pixels_per_mm, crop_half_size_px))
+    if core_mask.sum() >= 3:
+        yy, xx = np.nonzero(core_mask)
+        patch_center_x, patch_center_y = float(xx.mean()), float(yy.mean())
 
-    mask, contour, area_px = _iso_region(bump, frac * P, cx, cy, ppmm)
-    if mask is None or area_px < 3 or contour is None or len(contour) < 5:
-        res["reason"] = "no iso-region"
-        return res
+    mask, contour, region_area_pixels = _iso_region(contrast_bump, iso_fraction * peak_contrast, patch_center_x, patch_center_y, pixels_per_mm)
+    if mask is None or region_area_pixels < 3 or contour is None or len(contour) < 5:
+        measurement_result["reason"] = "no iso-region"
+        return measurement_result
 
-    area_mm2 = area_px / ppmm**2
-    d_eq_mm = 2.0 * math.sqrt(area_mm2 / math.pi)
-    ys, xs = np.nonzero(mask)
-    pts = np.stack([xs - xs.mean(), ys - ys.mean()], 1).astype(np.float64)
-    covm = (pts.T @ pts) / len(pts)
-    lam = np.sort(np.linalg.eigvalsh(covm))[::-1]  # lam1 >= lam2
-    lam = np.clip(lam, 1e-6, None)
-    ecc = math.sqrt(max(0.0, 1.0 - lam[1] / lam[0]))
-    major_mm, minor_mm = 4 * math.sqrt(lam[0]) / ppmm, 4 * math.sqrt(lam[1]) / ppmm
-    perim_mm = cv2.arcLength(contour, True) / ppmm
-    circ = 4 * math.pi * area_mm2 / max(perim_mm**2, 1e-9)
-    border = 1.0 / max(circ, 1e-6) - 1.0
+    region_area_mm2 = region_area_pixels / pixels_per_mm**2
+    equivalent_diameter_mm = 2.0 * math.sqrt(region_area_mm2 / math.pi)
+    region_pixel_y, region_pixel_x = np.nonzero(mask)
+    centered_region_points = np.stack([region_pixel_x - region_pixel_x.mean(), region_pixel_y - region_pixel_y.mean()], 1).astype(np.float64)
+    region_covariance = (centered_region_points.T @ centered_region_points) / len(centered_region_points)
+    region_eigenvalues = np.sort(np.linalg.eigvalsh(region_covariance))[::-1]  # lam1 >= lam2
+    region_eigenvalues = np.clip(region_eigenvalues, 1e-6, None)
+    region_eccentricity = math.sqrt(max(0.0, 1.0 - region_eigenvalues[1] / region_eigenvalues[0]))
+    major_axis_length_mm, minor_axis_length_mm = 4 * math.sqrt(region_eigenvalues[0]) / pixels_per_mm, 4 * math.sqrt(region_eigenvalues[1]) / pixels_per_mm
+    region_perimeter_mm = cv2.arcLength(contour, True) / pixels_per_mm
+    region_circularity = 4 * math.pi * region_area_mm2 / max(region_perimeter_mm**2, 1e-9)
+    boundary_irregularity = 1.0 / max(region_circularity, 1e-6) - 1.0
 
     # boundary-localization sigma from the local melanin noise band
     annulus = (
-        _disk_mask((sz, sz), cx, cy, r_out)
-        & ~_disk_mask((sz, sz), cx, cy, r_in)
-        & (pc > 0)
-        & ~other_mask
+        _disk_mask((sz, sz), patch_center_x, patch_center_y, baseline_outer_radius_px)
+        & ~_disk_mask((sz, sz), patch_center_x, patch_center_y, baseline_inner_radius_px)
+        & (patch_coverage > 0)
+        & ~other_mole_exclusion_mask
     )
-    sig_m = (
-        1.4826 * np.median(np.abs(bump[annulus] - np.median(bump[annulus])))
+    boundary_contrast_sigma = (
+        1.4826 * np.median(np.abs(contrast_bump[annulus] - np.median(contrast_bump[annulus])))
         if annulus.sum() >= 20
         else 0.02
     )
-    gy, gx = np.gradient(bump)
-    gmag = np.hypot(gx, gy)
-    cpts = contour.reshape(-1, 2)
-    gbar = float(np.mean(gmag[cpts[:, 1], cpts[:, 0]]))
-    gbar = max(gbar, 1e-4)
-    sigma_radius_mm = math.sqrt((sig_m / gbar) ** 2 + (frac * sig_m / gbar) ** 2) / ppmm
-    sigma_diam = 2 * sigma_radius_mm
-    sigma_area = perim_mm * sigma_radius_mm
+    gradient_y, gradient_x = np.gradient(contrast_bump)
+    gradient_magnitude = np.hypot(gradient_x, gradient_y)
+    contour_points = contour.reshape(-1, 2)
+    mean_boundary_gradient = float(np.mean(gradient_magnitude[contour_points[:, 1], contour_points[:, 0]]))
+    mean_boundary_gradient = max(mean_boundary_gradient, 1e-4)
+    boundary_radius_sigma_mm = math.sqrt((boundary_contrast_sigma / mean_boundary_gradient) ** 2 + (iso_fraction * boundary_contrast_sigma / mean_boundary_gradient) ** 2) / pixels_per_mm
+    diameter_measurement_sigma_mm = 2 * boundary_radius_sigma_mm
+    area_measurement_sigma_mm = region_perimeter_mm * boundary_radius_sigma_mm
 
     # validity: region must not touch the eroded-coverage edge or be too ragged
-    edge = cv2.erode(pc, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
-    touches_edge = (mask.astype(bool) & (edge == 0)).any()
-    hull = cv2.convexHull(contour)
-    solidity = area_px / max(cv2.contourArea(hull), 1.0)
-    valid = (not touches_edge) and solidity >= 0.7 and d_eq_mm >= 0.5
+    eroded_coverage = cv2.erode(patch_coverage, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)))
+    touches_edge = (mask.astype(bool) & (eroded_coverage == 0)).any()
+    convex_hull = cv2.convexHull(contour)
+    region_solidity = region_area_pixels / max(cv2.contourArea(convex_hull), 1.0)
+    measurement_valid = (not touches_edge) and region_solidity >= 0.7 and equivalent_diameter_mm >= 0.5
 
-    res.update(
-        valid=bool(valid),
-        d_eq_mm=d_eq_mm,
-        area_mm2=area_mm2,
-        eccentricity=ecc,
-        major_mm=major_mm,
-        minor_mm=minor_mm,
-        border_irregularity=border,
-        perim_mm=perim_mm,
-        peak=P,
-        center=(int(round(x0 + cx)), int(round(y0 + cy))),
-        sigma_diam_meas=sigma_diam,
-        sigma_area_meas=sigma_area,
-        sigma_m=sig_m,
-        gbar=gbar,
-        n_pixels=area_px,
-        reason=("" if valid else ("edge" if touches_edge else f"solidity {solidity:.2f}")),
+    measurement_result.update(
+        valid=bool(measurement_valid),
+        d_eq_mm=equivalent_diameter_mm,
+        area_mm2=region_area_mm2,
+        eccentricity=region_eccentricity,
+        major_mm=major_axis_length_mm,
+        minor_mm=minor_axis_length_mm,
+        border_irregularity=boundary_irregularity,
+        perim_mm=region_perimeter_mm,
+        peak=peak_contrast,
+        center=(int(round(x0 + patch_center_x)), int(round(y0 + patch_center_y))),
+        sigma_diam_meas=diameter_measurement_sigma_mm,
+        sigma_area_meas=area_measurement_sigma_mm,
+        sigma_m=boundary_contrast_sigma,
+        gbar=mean_boundary_gradient,
+        n_pixels=region_area_pixels,
+        reason=("" if measurement_valid else ("edge" if touches_edge else f"solidity {region_solidity:.2f}")),
     )
-    return res
+    return measurement_result
 
 
 # --------------------------------------------------------------------------- #
@@ -208,78 +208,78 @@ def load_mole_change_calibration(path=None):
 
     path = path or os.path.join(os.path.dirname(os.path.abspath(__file__)), "null_calibration.json")
     if os.path.exists(path):
-        d = json.load(open(path))
-        d.setdefault("uncalibrated", False)
-        return d
+        distance = json.load(open(path))
+        distance.setdefault("uncalibrated", False)
+        return distance
     return dict(k=2.5, floor_diam=0.30, floor_area=None, uncalibrated=True)
 
 
-def estimate_mole_detection_position_sigma(mel, cov, mole, ppmm, n=24, seed=0):
+def estimate_mole_detection_position_sigma(mel, cov, mole, pixels_per_mm, jittered_sample_count=24, random_seed=0):
     """Detector-repeatability sigma: std of the size measurement over N rigidly-
-    jittered, noise-added copies of the mole's own crop. Uses the scan's own
+    jittered, noise-added copies of the mole's own melanin_crop. Uses the scan's own
     robust skin noise, so a fainter/brighter scan gets the appropriately larger
     error bar (the exposure robustness, expressed as uncertainty)."""
-    inside = cov > 0
-    sig = 1.4826 * np.median(np.abs(mel[inside] - np.median(mel[inside]))) if inside.any() else 0.02
-    radius_mm = max(mole["radius_mm"], 0.3)
-    half = int(math.ceil(max(3 * radius_mm, 4.0) * ppmm)) + int(math.ceil(2 * ppmm))
-    H, W = mel.shape
-    cx, cy = int(round(mole["x"])), int(round(mole["y"]))
-    x0, y0 = cx - half, cy - half
-    crop = np.zeros((2 * half, 2 * half), np.float32)
-    cropc = np.zeros((2 * half, 2 * half), np.uint8)
-    sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(W, cx + half), min(H, cy + half)
-    crop[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = mel[sy0:sy1, sx0:sx1]
-    cropc[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = cov[sy0:sy1, sx0:sx1]
-    rng = np.random.default_rng(seed)
-    keys = ("d_eq_mm", "area_mm2", "eccentricity", "border_irregularity")
-    vals = {k: [] for k in keys}
-    cen = half
-    m0 = dict(x=cen, y=cen, radius_mm=radius_mm)
-    for _ in range(n):
-        dx, dy = rng.uniform(-0.5, 0.5, 2)
-        th = rng.uniform(-1, 1)
-        M = cv2.getRotationMatrix2D((cen, cen), th, 1.0)
-        M[0, 2] += dx
-        M[1, 2] += dy
-        j = cv2.warpAffine(
-            crop, M, (2 * half, 2 * half), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT
+    covered_skin_mask = cov > 0
+    skin_noise_sigma = 1.4826 * np.median(np.abs(mel[covered_skin_mask] - np.median(mel[covered_skin_mask]))) if covered_skin_mask.any() else 0.02
+    mole_radius_mm = max(mole["radius_mm"], 0.3)
+    crop_half_size_px = int(math.ceil(max(3 * mole_radius_mm, 4.0) * pixels_per_mm)) + int(math.ceil(2 * pixels_per_mm))
+    image_height, image_width = mel.shape
+    patch_center_x, patch_center_y = int(round(mole["x"])), int(round(mole["y"]))
+    crop_origin_x, crop_origin_y = patch_center_x - crop_half_size_px, patch_center_y - crop_half_size_px
+    melanin_crop = np.zeros((2 * crop_half_size_px, 2 * crop_half_size_px), np.float32)
+    coverage_crop = np.zeros((2 * crop_half_size_px, 2 * crop_half_size_px), np.uint8)
+    sx0, sy0, sx1, sy1 = max(0, crop_origin_x), max(0, crop_origin_y), min(image_width, patch_center_x + crop_half_size_px), min(image_height, patch_center_y + crop_half_size_px)
+    melanin_crop[sy0 - crop_origin_y : sy1 - crop_origin_y, sx0 - crop_origin_x : sx1 - crop_origin_x] = mel[sy0:sy1, sx0:sx1]
+    coverage_crop[sy0 - crop_origin_y : sy1 - crop_origin_y, sx0 - crop_origin_x : sx1 - crop_origin_x] = cov[sy0:sy1, sx0:sx1]
+    random_generator = np.random.default_rng(random_seed)
+    measurement_names = ("d_eq_mm", "area_mm2", "eccentricity", "border_irregularity")
+    measurement_samples = {measurement_name: [] for measurement_name in measurement_names}
+    patch_center_px = crop_half_size_px
+    synthetic_mole = dict(x=patch_center_px, y=patch_center_px, radius_mm=mole_radius_mm)
+    for iteration_index in range(jittered_sample_count):
+        translation_jitter_x, translation_jitter_y = random_generator.uniform(-0.5, 0.5, 2)
+        rotation_angle_degrees = random_generator.uniform(-1, 1)
+        affine_warp_matrix = cv2.getRotationMatrix2D((patch_center_px, patch_center_px), rotation_angle_degrees, 1.0)
+        affine_warp_matrix[0, 2] += translation_jitter_x
+        affine_warp_matrix[1, 2] += translation_jitter_y
+        warped_melanin_crop = cv2.warpAffine(
+            melanin_crop, affine_warp_matrix, (2 * crop_half_size_px, 2 * crop_half_size_px), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT
         )
-        jc = cv2.warpAffine(cropc, M, (2 * half, 2 * half), flags=cv2.INTER_NEAREST)
-        j = j + rng.normal(0, sig, j.shape).astype(np.float32)
-        r = measure_mole_size(j, jc, m0, ppmm)
-        if r["valid"] and np.isfinite(r["d_eq_mm"]):
-            for k in keys:
-                vals[k].append(r[k])
-    out = {
-        "sigma_" + k: (float(np.std(vals[k])) if len(vals[k]) >= 5 else float("nan")) for k in keys
+        warped_coverage_crop = cv2.warpAffine(coverage_crop, affine_warp_matrix, (2 * crop_half_size_px, 2 * crop_half_size_px), flags=cv2.INTER_NEAREST)
+        warped_melanin_crop = warped_melanin_crop + random_generator.normal(0, skin_noise_sigma, warped_melanin_crop.shape).astype(np.float32)
+        mole_measurement = measure_mole_size(warped_melanin_crop, warped_coverage_crop, synthetic_mole, pixels_per_mm)
+        if mole_measurement["valid"] and np.isfinite(mole_measurement["d_eq_mm"]):
+            for measurement_name in measurement_names:
+                measurement_samples[measurement_name].append(mole_measurement[measurement_name])
+    measurement_sigmas = {
+        "sigma_" + measurement_name: (float(np.std(measurement_samples[measurement_name])) if len(measurement_samples[measurement_name]) >= 5 else float("nan")) for measurement_name in measurement_names
     }
-    out["n"] = len(vals["d_eq_mm"])
-    return out
+    measurement_sigmas["n"] = len(measurement_samples["d_eq_mm"])
+    return measurement_sigmas
 
 
-def build_mole_alignment_residual_field(corr, ppmm):
+def build_mole_alignment_residual_field(corr, pixels_per_mm):
     """Smooth field: A-frame position (px) -> registration sigma (mm), from the
     winning alignment's per-correspondence residual. RBF when SIFT-dense & wide;
     IDW for the sparse mole-constellation; flat 1mm when uncorroborated."""
     if not corr or len(corr.get("dst_px", [])) < 3:
-        return lambda P: np.full(len(np.atleast_2d(P)), 1.0)
+        return lambda points: np.full(len(np.atleast_2d(points)), 1.0)
     src = np.asarray(corr["dst_px"], float)
     res = np.asarray(corr["resid_mm"], float)
-    spread = float(np.hypot(*(src.max(0) - src.min(0))) / ppmm)
+    spread = float(np.hypot(*(src.max(0) - src.min(0))) / pixels_per_mm)
     if len(src) >= 8 and spread >= 40:
-        s = float(np.median(res)) ** 2 * len(src) + 1e-6
-        rbf = RBFInterpolator(src, res, kernel="thin_plate_spline", smoothing=s)
-        return lambda P: np.clip(rbf(np.atleast_2d(P)), 0, None)
+        score = float(np.median(res)) ** 2 * len(src) + 1e-6
+        rbf = RBFInterpolator(src, res, kernel="thin_plate_spline", smoothing=score)
+        return lambda points: np.clip(rbf(np.atleast_2d(points)), 0, None)
 
-    def idw(P):
-        P = np.atleast_2d(P)
-        o = []
-        for p in P:
-            d2 = ((src - p) ** 2).sum(1)
-            w = 1.0 / (d2 + (5 * ppmm) ** 2)
-            o.append(math.sqrt(max(0.0, (w * res**2).sum() / w.sum())))
-        return np.array(o)
+    def idw(points):
+        points = np.atleast_2d(points)
+        estimated_uncertainties = []
+        for point in points:
+            d2 = ((src - point) ** 2).sum(1)
+            weight = 1.0 / (d2 + (5 * pixels_per_mm) ** 2)
+            estimated_uncertainties.append(math.sqrt(max(0.0, (weight * res**2).sum() / weight.sum())))
+        return np.array(estimated_uncertainties)
 
     return idw
 
@@ -287,23 +287,28 @@ def build_mole_alignment_residual_field(corr, ppmm):
 def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, calib):
     """Combine registration + detector + null-floor sigmas in quadrature; classify
     grew/shrank/stable with a significance gate (|z|>=k AND |delta|>=floor)."""
-    k = calib.get("k", 2.5)
+    item_index = calib.get("k", 2.5)
     floor_d = calib.get("floor_diam", 0.30)
     d_ref = max(sa["d_eq_mm"] if np.isfinite(sa["d_eq_mm"]) else 1.0, 0.5)
     floor_a = calib.get("floor_area") or (math.pi * d_ref / 2) * floor_d
     sig_reg_d = math.sqrt(2) * sigma_pos_mm
     sig_reg_a = (math.pi * d_ref / 2) * sig_reg_d
 
-    def q(*xs):
-        return math.sqrt(sum((x or 0.0) ** 2 for x in xs if x is None or np.isfinite(x)))
+    def quadrature_sum(*uncertainty_components):
+        finite_component_squares = (
+            (component or 0.0) ** 2
+            for component in uncertainty_components
+            if component is None or np.isfinite(component)
+        )
+        return math.sqrt(sum(finite_component_squares))
 
-    sig_d = q(sig_reg_d, da.get("sigma_d_eq_mm"), db.get("sigma_d_eq_mm"), floor_d)
-    sig_a = q(sig_reg_a, da.get("sigma_area_mm2"), db.get("sigma_area_mm2"), floor_a)
+    sig_d = quadrature_sum(sig_reg_d, da.get("sigma_d_eq_mm"), db.get("sigma_d_eq_mm"), floor_d)
+    sig_a = quadrature_sum(sig_reg_a, da.get("sigma_area_mm2"), db.get("sigma_area_mm2"), floor_a)
     valid = bool(sa["valid"] and sb["valid"])
     dd = sb["d_eq_mm"] - sa["d_eq_mm"]
     dA = sb["area_mm2"] - sa["area_mm2"]
-    z = dd / sig_d if sig_d > 0 else 0.0
-    sig = bool(valid and abs(z) >= k and abs(dd) >= floor_d)
+    world_z = dd / sig_d if sig_d > 0 else 0.0
+    sig = bool(valid and abs(world_z) >= item_index and abs(dd) >= floor_d)
     cls = (
         "uncertain"
         if not valid
@@ -314,7 +319,7 @@ def combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos_mm, cali
         d_eq_b_mm=round(sb["d_eq_mm"], 2),
         delta_diam_mm=round(dd, 2),
         sigma_diam_mm=round(sig_d, 2),
-        z_diam=round(z, 1),
+        z_diam=round(world_z, 1),
         area_a_mm2=round(sa["area_mm2"], 2),
         area_b_mm2=round(sb["area_mm2"], 2),
         delta_area_mm2=round(dA, 2),
@@ -334,25 +339,25 @@ def assign_stable_mole_lesion_id(uv):
     return f"M{int(round(uv[0]))}_{int(round(uv[1]))}"
 
 
-def measure_longitudinal_mole_changes(cc, melA, melB, detA, detB, molesA, molesB, pairs, al, ppmm, calib=None):
+def measure_longitudinal_mole_changes(cc, melA, melB, detA, detB, molesA, molesB, pairs, al, pixels_per_mm, calib=None):
     """Per matched pair: measure size in each scan's OWN un-warped frame, attach
     registration + detector uncertainty, classify change. Returns (list, calib)."""
     calib = calib or load_mole_change_calibration()
-    field = build_mole_alignment_residual_field(al.get("corr"), ppmm)
+    field = build_mole_alignment_residual_field(al.get("corr"), pixels_per_mm)
     out = []
-    for idx, p in enumerate(pairs):
-        mA, mB = molesA[p["iA"]], molesB[p["iB"]]
-        sa = measure_mole_size(melA, detA, mA, ppmm, other_moles=molesA)
-        sb = measure_mole_size(melB, detB, mB, ppmm, other_moles=molesB)
-        da = estimate_mole_detection_position_sigma(melA, detA, mA, ppmm, seed=1 + idx)
-        db = estimate_mole_detection_position_sigma(melB, detB, mB, ppmm, seed=1001 + idx)
+    for idx, point in enumerate(pairs):
+        mA, mB = molesA[point["iA"]], molesB[point["iB"]]
+        sa = measure_mole_size(melA, detA, mA, pixels_per_mm, other_mole_detections=molesA)
+        sb = measure_mole_size(melB, detB, mB, pixels_per_mm, other_mole_detections=molesB)
+        da = estimate_mole_detection_position_sigma(melA, detA, mA, pixels_per_mm, random_seed=1 + idx)
+        db = estimate_mole_detection_position_sigma(melB, detB, mB, pixels_per_mm, random_seed=1001 + idx)
         sigma_pos = float(field(np.array([[mA["x"], mA["y"]]]))[0])
         ch = combine_mole_measurements_and_flag_change(sa, sb, da, db, sigma_pos, calib)
-        u = round(cc["umin"] + mA["x"] / ppmm, 1)
-        v = round(cc["vmin"] + mA["y"] / ppmm, 1)
-        ch["id"] = assign_stable_mole_lesion_id((u, v))
-        ch["uv_a_mm"] = [u, v]
-        ch["resid_mm"] = round(p["resid_mm"], 2)
+        texture_u = round(cc["umin"] + mA["x"] / pixels_per_mm, 1)
+        texture_v = round(cc["vmin"] + mA["y"] / pixels_per_mm, 1)
+        ch["id"] = assign_stable_mole_lesion_id((texture_u, texture_v))
+        ch["uv_a_mm"] = [texture_u, texture_v]
+        ch["resid_mm"] = round(point["resid_mm"], 2)
         out.append(ch)
     return out, calib
 
@@ -376,8 +381,8 @@ def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ)
 
     pp = cc["ppmm"]
     with open(path, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(
+        csv_writer = csv.writer(fh)
+        csv_writer.writerow(
             [
                 "id",
                 "type",
@@ -392,33 +397,33 @@ def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ)
                 "class",
             ]
         )
-        for c in changes:
-            w.writerow(
+        for candidate in changes:
+            csv_writer.writerow(
                 [
-                    c["id"],
-                    c["class"],
-                    c["uv_a_mm"][0],
-                    c["uv_a_mm"][1],
-                    c["d_eq_a_mm"],
-                    c["d_eq_b_mm"],
-                    c["delta_diam_mm"],
-                    c["sigma_diam_mm"],
-                    c["z_diam"],
-                    c["significant"],
-                    c["class"],
+                    candidate["id"],
+                    candidate["class"],
+                    candidate["uv_a_mm"][0],
+                    candidate["uv_a_mm"][1],
+                    candidate["d_eq_a_mm"],
+                    candidate["d_eq_b_mm"],
+                    candidate["delta_diam_mm"],
+                    candidate["sigma_diam_mm"],
+                    candidate["z_diam"],
+                    candidate["significant"],
+                    candidate["class"],
                 ]
             )
-        for j in newJ:
-            u = round(cc["umin"] + molesB[j]["x"] / pp, 1)
-            v = round(cc["vmin"] + molesB[j]["y"] / pp, 1)
-            w.writerow(
+        for neighbor_index in newJ:
+            texture_u = round(cc["umin"] + molesB[neighbor_index]["x"] / pp, 1)
+            texture_v = round(cc["vmin"] + molesB[neighbor_index]["y"] / pp, 1)
+            csv_writer.writerow(
                 [
-                    assign_stable_mole_lesion_id((u, v)),
+                    assign_stable_mole_lesion_id((texture_u, texture_v)),
                     "new",
-                    u,
-                    v,
+                    texture_u,
+                    texture_v,
                     "",
-                    round(molesB[j]["diam_mm"], 2),
+                    round(molesB[neighbor_index]["diam_mm"], 2),
                     "",
                     "",
                     "",
@@ -426,16 +431,16 @@ def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ)
                     "new",
                 ]
             )
-        for i in disJ:
-            u = round(cc["umin"] + molesA[i]["x"] / pp, 1)
-            v = round(cc["vmin"] + molesA[i]["y"] / pp, 1)
-            w.writerow(
+        for index in disJ:
+            texture_u = round(cc["umin"] + molesA[index]["x"] / pp, 1)
+            texture_v = round(cc["vmin"] + molesA[index]["y"] / pp, 1)
+            csv_writer.writerow(
                 [
-                    assign_stable_mole_lesion_id((u, v)),
+                    assign_stable_mole_lesion_id((texture_u, texture_v)),
                     "disappeared",
-                    u,
-                    v,
-                    round(molesA[i]["diam_mm"], 2),
+                    texture_u,
+                    texture_v,
+                    round(molesA[index]["diam_mm"], 2),
                     "",
                     "",
                     "",
@@ -447,20 +452,39 @@ def write_mole_change_results_csv(path, cc, changes, molesB, molesA, newJ, disJ)
 
 
 def render_mole_change_overlay(
-    out, cc, mutual, changes, molesA, molesB, pairs, newJ, disJ, T, ppmm, labels=("A", "B")
+    out,
+    cc,
+    mutual,
+    changes,
+    molesA,
+    molesB,
+    pairs,
+    newJ,
+    disJ,
+    transform_matrix=None,
+    pixels_per_mm=None,
+    labels=("A", "B"),
+    **legacy_options,
 ):
+    transform_matrix = legacy_options.pop("T", transform_matrix)
+    pixels_per_mm = legacy_options.pop("ppmm", pixels_per_mm)
+    if legacy_options:
+        unexpected_option = next(iter(legacy_options))
+        raise TypeError(f"render_mole_change_overlay got an unexpected keyword argument {unexpected_option!r}")
+    if pixels_per_mm is None:
+        raise TypeError("render_mole_change_overlay requires pixels_per_mm")
     base = cc["texA"].copy()
     dim = (base.astype(np.float32) * 0.45).astype(np.uint8)
     canvas = np.where(mutual[..., None].astype(bool), base, dim)
-    for c, p in zip(changes, pairs):
-        mA = molesA[p["iA"]]
-        col = _CLASS_BGR.get(c["class"], (0, 200, 0))
-        ra = int(max(c["d_eq_a_mm"], 0.5) / 2 * ppmm) + 2
-        rb = int(max(c["d_eq_b_mm"], 0.5) / 2 * ppmm) + 2
+    for candidate, point in zip(changes, pairs):
+        mA = molesA[point["iA"]]
+        col = _CLASS_BGR.get(candidate["class"], (0, 200, 0))
+        ra = int(max(candidate["d_eq_a_mm"], 0.5) / 2 * pixels_per_mm) + 2
+        rb = int(max(candidate["d_eq_b_mm"], 0.5) / 2 * pixels_per_mm) + 2
         cv2.circle(canvas, (mA["x"], mA["y"]), ra, col, 2)  # baseline size
         cv2.circle(canvas, (mA["x"], mA["y"]), rb, col, 1)  # follow-up size
-        tag = f"{c['delta_diam_mm']:+.1f}mm" if c["class"] in ("grew", "shrank") else c["class"][:4]
-        star = "*" if c["significant"] else ""
+        tag = f"{candidate['delta_diam_mm']:+.1f}mm" if candidate["class"] in ("grew", "shrank") else candidate["class"][:4]
+        star = "*" if candidate["significant"] else ""
         cv2.putText(
             canvas,
             f"{tag}{star}",
@@ -471,18 +495,18 @@ def render_mole_change_overlay(
             2,
             cv2.LINE_AA,
         )
-    for j in newJ:
-        transform = np.asarray(T) if T is not None else _IDENTITY
+    for neighbor_index in newJ:
+        transform = np.asarray(transform_matrix) if transform_matrix is not None else _IDENTITY
         xy = (
-            np.asarray([[molesB[j]["x"], molesB[j]["y"]]], float) @ transform[:, :2].T
+            np.asarray([[molesB[neighbor_index]["x"], molesB[neighbor_index]["y"]]], float) @ transform[:, :2].T
         ) + transform[:, 2]
-        x, y = int(xy[0, 0]), int(xy[0, 1])
-        cv2.circle(canvas, (x, y), int(molesB[j]["radius_mm"] * ppmm) + 6, _CLASS_BGR["new"], 3)
-    for i in disJ:
+        aligned_pixel_x, aligned_pixel_y = int(xy[0, 0]), int(xy[0, 1])
+        cv2.circle(canvas, (aligned_pixel_x, aligned_pixel_y), int(molesB[neighbor_index]["radius_mm"] * pixels_per_mm) + 6, _CLASS_BGR["new"], 3)
+    for index in disJ:
         cv2.circle(
             canvas,
-            (molesA[i]["x"], molesA[i]["y"]),
-            int(molesA[i]["radius_mm"] * ppmm) + 6,
+            (molesA[index]["x"], molesA[index]["y"]),
+            int(molesA[index]["radius_mm"] * pixels_per_mm) + 6,
             _CLASS_BGR["disappeared"],
             3,
         )
@@ -502,37 +526,37 @@ def render_mole_change_overlay(
 
 
 def _crop(img, cx, cy, half):
-    h, w = img.shape[:2]
-    o = np.full((2 * half, 2 * half, 3), (40, 40, 40), np.uint8)
+    image_height, image_width = img.shape[:2]
+    crop = np.full((2 * half, 2 * half, 3), (40, 40, 40), np.uint8)
     x0, y0 = int(cx) - half, int(cy) - half
-    sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(w, x0 + 2 * half), min(h, y0 + 2 * half)
+    sx0, sy0, sx1, sy1 = max(0, x0), max(0, y0), min(image_width, x0 + 2 * half), min(image_height, y0 + 2 * half)
     if sx1 > sx0 and sy1 > sy0:
-        o[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = img[sy0:sy1, sx0:sx1]
-    return o
+        crop[sy0 - y0 : sy1 - y0, sx0 - x0 : sx1 - x0] = img[sy0:sy1, sx0:sx1]
+    return crop
 
 
 def render_mole_change_montage(
-    out, cc, changes, molesA, molesB, pairs, T, ppmm, crop_mm=12.0, labels=("A", "B")
+    out, cc, changes, molesA, molesB, pairs, transform_matrix, pixels_per_mm, crop_mm=12.0, labels=("A", "B")
 ):
-    half = int(crop_mm / 2 * ppmm)
-    order = sorted(range(len(changes)), key=lambda i: -abs(changes[i]["z_diam"]))
+    half = int(crop_mm / 2 * pixels_per_mm)
+    order = sorted(range(len(changes)), key=lambda index: -abs(changes[index]["z_diam"]))
     rows = []
-    for i in order:
-        c, p = changes[i], pairs[i]
-        mA, mB = molesA[p["iA"]], molesB[p["iB"]]
+    for index in order:
+        candidate, point = changes[index], pairs[index]
+        mA, mB = molesA[point["iA"]], molesB[point["iB"]]
         ca = _crop(cc["texA"], mA["x"], mA["y"], half)
         cb = _crop(cc["texB"], mB["x"], mB["y"], half)
-        col = _CLASS_BGR.get(c["class"], (0, 200, 0))
-        cv2.circle(ca, (half, half), int(max(c["d_eq_a_mm"], 0.5) / 2 * ppmm), col, 1)
-        cv2.circle(cb, (half, half), int(max(c["d_eq_b_mm"], 0.5) / 2 * ppmm), col, 1)
+        col = _CLASS_BGR.get(candidate["class"], (0, 200, 0))
+        cv2.circle(ca, (half, half), int(max(candidate["d_eq_a_mm"], 0.5) / 2 * pixels_per_mm), col, 1)
+        cv2.circle(cb, (half, half), int(max(candidate["d_eq_b_mm"], 0.5) / 2 * pixels_per_mm), col, 1)
         row = np.hstack([ca, np.full((2 * half, 6, 3), 30, np.uint8), cb])
         bar = np.full((26, row.shape[1], 3), 30, np.uint8)
-        star = " *" if c["significant"] else ""
+        star = " *" if candidate["significant"] else ""
         cv2.putText(
             bar,
-            f"{c['id']} {c['uv_a_mm']}mm  d:{c['d_eq_a_mm']}->"
-            f"{c['d_eq_b_mm']}mm  d{c['delta_diam_mm']:+.2f}+-"
-            f"{c['sigma_diam_mm']}mm  {c['class'].upper()}{star}",
+            f"{candidate['id']} {candidate['uv_a_mm']}mm  d:{candidate['d_eq_a_mm']}->"
+            f"{candidate['d_eq_b_mm']}mm  d{candidate['delta_diam_mm']:+.2f}+-"
+            f"{candidate['sigma_diam_mm']}mm  {candidate['class'].upper()}{star}",
             (4, 18),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.45,

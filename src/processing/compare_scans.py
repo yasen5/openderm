@@ -108,7 +108,7 @@ def main():
     rdB = os.path.join(args.captures, args.scan_b, args.reg_dir)
     out = args.out or os.path.join(args.captures, args.scan_a, f"compare-{args.scan_b}")
     os.makedirs(out, exist_ok=True)
-    diam = tuple(float(x) for x in args.mole_diam_mm.split(":"))
+    diam = tuple(float(world_x) for world_x in args.mole_diam_mm.split(":"))
 
     gA, gB = load_gauge(rdA), load_gauge(rdB)
     # gauge-consistency assert: the (u,v) frame is only shared if the rig gauge is
@@ -159,10 +159,10 @@ def main():
 
     # pick the alignment by mole corroboration + cross-method agreement (shared)
     al = select_best_scan_alignment(ainfo, molesA, molesB, args.ppmm, max_resid_mm=args.max_resid_mm)
-    T, align_mode, confidence, n_corrob = (al["T"], al["mode"], al["confidence"], al["n_corrob"])
+    transform_matrix, align_mode, confidence, n_corrob = (al["T"], al["mode"], al["confidence"], al["n_corrob"])
     mole_inl = al["mole_inl"]
     methods_agree, sift_overwhelming = al["methods_agree"], al["sift_overwhelming"]
-    print("[3] candidates by moles-aligned: " + ", ".join(f"{nm}={n}" for nm, n in al["scored"]))
+    print("[3] candidates by moles-aligned: " + ", ".join(f"{nm}={item_count}" for nm, item_count in al["scored"]))
     why = []
     if n_corrob >= 5:
         why.append(f"{n_corrob} moles aligned")
@@ -178,21 +178,21 @@ def main():
         f"confidence={confidence.upper()}"
     )
 
-    pairs, onlyA, onlyB = match_scan_moles_after_alignment(molesA, molesB, T, args.ppmm, prior_mm)
+    pairs, onlyA, onlyB = match_scan_moles_after_alignment(molesA, molesB, transform_matrix, args.ppmm, prior_mm)
     constel = validate_mole_constellation_correspondence(molesA, molesB, pairs, args.ppmm)
 
     # new/disappeared: gate to mutual coverage AND verify the spot isn't merely
     # sub-threshold in the other scan (exposure differs across scans -> a faint
     # mole below the other threshold must NOT be reported as appeared/vanished).
-    Tinv = cv2.invertAffineTransform(T) if T is not None else IDENT  # A-frame->B
+    Tinv = cv2.invertAffineTransform(transform_matrix) if transform_matrix is not None else IDENT  # A-frame->B
     # verify against the same lightly-smoothed melanin the detector uses
     melA_s = gaussian_filter(melA, 0.35 * args.ppmm)
     melB_s = gaussian_filter(melB, 0.35 * args.ppmm)
     thrB = mel_threshold(melB_s, detB, args.min_contrast, args.k_sigma)
     thrA = mel_threshold(melA_s, detA, args.min_contrast, args.k_sigma)
     disappeared = []
-    for i in onlyA:
-        xy = apply_scan_alignment_transform(Tinv, [[molesA[i]["x"], molesA[i]["y"]]])[0]  # into B frame
+    for index in onlyA:
+        xy = apply_scan_alignment_transform(Tinv, [[molesA[index]["x"], molesA[index]["y"]]])[0]  # into B frame
         xi, yi = int(round(xy[0])), int(round(xy[1]))
         if not (
             0 <= yi < cc["covB"].shape[0]
@@ -202,10 +202,10 @@ def main():
             continue  # outside mutual coverage
         if present_in_other(melB_s, xy, args.ppmm, thrB):
             continue  # sub-threshold in B, not gone
-        disappeared.append(i)
+        disappeared.append(index)
     new = []
-    for j in onlyB:
-        xy = apply_scan_alignment_transform(T, [[molesB[j]["x"], molesB[j]["y"]]])[0]  # into A frame
+    for neighbor_index in onlyB:
+        xy = apply_scan_alignment_transform(transform_matrix, [[molesB[neighbor_index]["x"], molesB[neighbor_index]["y"]]])[0]  # into A frame
         xi, yi = int(round(xy[0])), int(round(xy[1]))
         if not (
             0 <= yi < cc["covA"].shape[0]
@@ -215,7 +215,7 @@ def main():
             continue
         if present_in_other(melA_s, xy, args.ppmm, thrA):
             continue
-        new.append(j)
+        new.append(neighbor_index)
     print(
         f"[5] matched {len(pairs)} moles (prior {prior_mm:.1f}mm)  "
         f"constellation: {constel['status']}"
@@ -226,9 +226,9 @@ def main():
     changes, calib = tm.measure_longitudinal_mole_changes(
         cc, melA, melB, detA, detB, molesA, molesB, pairs, al, args.ppmm
     )
-    n_grew = sum(1 for c in changes if c["class"] == "grew")
-    n_shrank = sum(1 for c in changes if c["class"] == "shrank")
-    n_stable = sum(1 for c in changes if c["class"] == "stable")
+    n_grew = sum(1 for candidate in changes if candidate["class"] == "grew")
+    n_shrank = sum(1 for candidate in changes if candidate["class"] == "shrank")
+    n_stable = sum(1 for candidate in changes if candidate["class"] == "stable")
     print(
         f"[6] size change: {n_grew} grew, {n_shrank} shrank, {n_stable} stable"
         + ("" if not calib.get("uncalibrated") else "  (uncalibrated floors)")
@@ -252,17 +252,17 @@ def main():
     print(f"  matched (candidate stable): {len(pairs)}")
     print(f"  NEW   (in {args.scan_b} only, within overlap): {len(new)}")
     print(f"  DISAPPEARED (in {args.scan_a} only, within overlap): {len(disappeared)}")
-    for c in sorted(changes, key=lambda d: -abs(d["z_diam"])):
-        if c["significant"]:
+    for candidate in sorted(changes, key=lambda distance: -abs(distance["z_diam"])):
+        if candidate["significant"]:
             print(
-                f"  {c['class'].upper()}: {c['id']} @ {c['uv_a_mm']}mm  "
-                f"{c['d_eq_a_mm']}->{c['d_eq_b_mm']}mm  "
-                f"(d{c['delta_diam_mm']:+.2f}+-{c['sigma_diam_mm']}mm, z={c['z_diam']})"
+                f"  {candidate['class'].upper()}: {candidate['id']} @ {candidate['uv_a_mm']}mm  "
+                f"{candidate['d_eq_a_mm']}->{candidate['d_eq_b_mm']}mm  "
+                f"(d{candidate['delta_diam_mm']:+.2f}+-{candidate['sigma_diam_mm']}mm, z={candidate['z_diam']})"
             )
 
     # the recovered subject repositioning (B->A), in gantry mm
-    if T is not None:
-        Tn = np.asarray(T)
+    if transform_matrix is not None:
+        Tn = np.asarray(transform_matrix)
         reposition = dict(
             scale=float(np.hypot(Tn[0, 0], Tn[0, 1])),
             rotation_deg=float(np.degrees(np.arctan2(Tn[1, 0], Tn[0, 0]))),
@@ -280,7 +280,7 @@ def main():
     # aligned green/magenta overlay (single dark spot = aligned mole)
     Bw = cv2.warpAffine(
         cc["texB"],
-        np.asarray(T) if T is not None else IDENT,
+        np.asarray(transform_matrix) if transform_matrix is not None else IDENT,
         (cc["W"], cc["H"]),
         flags=cv2.INTER_LINEAR,
         borderValue=(40, 40, 40),
@@ -339,10 +339,10 @@ def main():
             n_stable=n_stable,
         ),
         matched=changes,
-        new=[dict(uv_mm=list(cc_uv(cc, molesB[j])), diam_mm=molesB[j]["diam_mm"]) for j in new],
+        new=[dict(uv_mm=list(cc_uv(cc, molesB[neighbor_index])), diam_mm=molesB[neighbor_index]["diam_mm"]) for neighbor_index in new],
         disappeared=[
-            dict(uv_mm=list(cc_uv(cc, molesA[i])), diam_mm=molesA[i]["diam_mm"])
-            for i in disappeared
+            dict(uv_mm=list(cc_uv(cc, molesA[index])), diam_mm=molesA[index]["diam_mm"])
+            for index in disappeared
         ],
     )
     with open(os.path.join(out, "change_report.json"), "w") as fh:
@@ -360,12 +360,12 @@ def main():
         pairs,
         new,
         disappeared,
-        T,
+        transform_matrix,
         args.ppmm,
         labels=(args.scan_a, args.scan_b),
     )
     tm.render_mole_change_montage(
-        out, cc, changes, molesA, molesB, pairs, T, args.ppmm, labels=(args.scan_a, args.scan_b)
+        out, cc, changes, molesA, molesB, pairs, transform_matrix, args.ppmm, labels=(args.scan_a, args.scan_b)
     )
     cv2.imwrite(os.path.join(out, "common_A.jpg"), cc["texA"], [cv2.IMWRITE_JPEG_QUALITY, 90])
     cv2.imwrite(os.path.join(out, "common_B.jpg"), cc["texB"], [cv2.IMWRITE_JPEG_QUALITY, 90])
@@ -377,38 +377,38 @@ def main():
     )
 
 
-def cc_uv(cc, m):
-    return (round(cc["umin"] + m["x"] / cc["ppmm"], 1), round(cc["vmin"] + m["y"] / cc["ppmm"], 1))
+def cc_uv(cc, mask):
+    return (round(cc["umin"] + mask["x"] / cc["ppmm"], 1), round(cc["vmin"] + mask["y"] / cc["ppmm"], 1))
 
 
 def _write_csv(path, cc, molesA, molesB, pairs, new, disappeared):
     with open(path, "w", newline="") as fh:
-        w = csv.writer(fh)
-        w.writerow(["type", "u_mm", "v_mm", "diam_a_mm", "diam_b_mm", "resid_mm"])
-        for p in pairs:
-            u, v = cc_uv(cc, molesA[p["iA"]])
-            w.writerow(
+        csv_writer = csv.writer(fh)
+        csv_writer.writerow(["type", "u_mm", "v_mm", "diam_a_mm", "diam_b_mm", "resid_mm"])
+        for point in pairs:
+            texture_u, texture_v = cc_uv(cc, molesA[point["iA"]])
+            csv_writer.writerow(
                 [
                     "matched",
-                    u,
-                    v,
-                    round(molesA[p["iA"]]["diam_mm"], 2),
-                    round(molesB[p["iB"]]["diam_mm"], 2),
-                    round(p["resid_mm"], 2),
+                    texture_u,
+                    texture_v,
+                    round(molesA[point["iA"]]["diam_mm"], 2),
+                    round(molesB[point["iB"]]["diam_mm"], 2),
+                    round(point["resid_mm"], 2),
                 ]
             )
-        for j in new:
-            u, v = cc_uv(cc, molesB[j])
-            w.writerow(["new", u, v, "", round(molesB[j]["diam_mm"], 2), ""])
-        for i in disappeared:
-            u, v = cc_uv(cc, molesA[i])
-            w.writerow(["disappeared", u, v, round(molesA[i]["diam_mm"], 2), "", ""])
+        for neighbor_index in new:
+            texture_u, texture_v = cc_uv(cc, molesB[neighbor_index])
+            csv_writer.writerow(["new", texture_u, texture_v, "", round(molesB[neighbor_index]["diam_mm"], 2), ""])
+        for index in disappeared:
+            texture_u, texture_v = cc_uv(cc, molesA[index])
+            csv_writer.writerow(["disappeared", texture_u, texture_v, round(molesA[index]["diam_mm"], 2), "", ""])
 
 
-def _write_detections(path, tex, moles, ppmm):
+def _write_detections(path, tex, moles, pixels_per_mm):
     canvas = tex.copy()
-    for m in moles:
-        cv2.circle(canvas, (m["x"], m["y"]), int(m["radius_mm"] * ppmm) + 3, (0, 255, 255), 2)
+    for mask in moles:
+        cv2.circle(canvas, (mask["x"], mask["y"]), int(mask["radius_mm"] * pixels_per_mm) + 3, (0, 255, 255), 2)
     cv2.putText(
         canvas,
         f"{len(moles)} detections",
@@ -422,23 +422,23 @@ def _write_detections(path, tex, moles, ppmm):
     cv2.imwrite(path, canvas, [cv2.IMWRITE_JPEG_QUALITY, 88])
 
 
-def _write_overlay(out, cc, mutual, molesA, molesB, pairs, new, disappeared, T):
+def _write_overlay(out, cc, mutual, molesA, molesB, pairs, new, disappeared, transform_matrix):
     base = cc["texA"].copy()
     dim = (base.astype(np.float32) * 0.45).astype(np.uint8)
     m3 = mutual[..., None].astype(bool)
     canvas = np.where(m3, base, dim)
-    for p in pairs:  # stable = green
-        m = molesA[p["iA"]]
-        cv2.circle(canvas, (m["x"], m["y"]), int(m["radius_mm"] * cc["ppmm"] + 6), (0, 200, 0), 2)
-    for j in new:  # new = red (B coords -> A)
-        b = molesB[j]
-        xy = apply_scan_alignment_transform(T, [[b["x"], b["y"]]])[0]
+    for point in pairs:  # stable = green
+        mask = molesA[point["iA"]]
+        cv2.circle(canvas, (mask["x"], mask["y"]), int(mask["radius_mm"] * cc["ppmm"] + 6), (0, 200, 0), 2)
+    for neighbor_index in new:  # new = red (B coords -> A)
+        follow_up_mole = molesB[neighbor_index]
+        xy = apply_scan_alignment_transform(transform_matrix, [[follow_up_mole["x"], follow_up_mole["y"]]])[0]
         cv2.circle(
-            canvas, (int(xy[0]), int(xy[1])), int(b["radius_mm"] * cc["ppmm"] + 6), (0, 0, 255), 3
+            canvas, (int(xy[0]), int(xy[1])), int(follow_up_mole["radius_mm"] * cc["ppmm"] + 6), (0, 0, 255), 3
         )
-    for i in disappeared:  # disappeared = blue
-        a = molesA[i]
-        cv2.circle(canvas, (a["x"], a["y"]), int(a["radius_mm"] * cc["ppmm"] + 6), (255, 80, 0), 3)
+    for index in disappeared:  # disappeared = blue
+        baseline_mole = molesA[index]
+        cv2.circle(canvas, (baseline_mole["x"], baseline_mole["y"]), int(baseline_mole["radius_mm"] * cc["ppmm"] + 6), (255, 80, 0), 3)
     cv2.putText(
         canvas,
         "green=stable  red=new  blue=disappeared  (dim=outside mutual coverage)",

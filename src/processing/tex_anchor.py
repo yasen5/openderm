@@ -31,24 +31,35 @@ class Gauge:
     vmin: float
     umax: float
     vmax: float
-    ppmm: float
-    W: int
-    H: int
+    pixels_per_mm: float
+    image_width: int
+    image_height: int
     base_R: np.ndarray  # world -> gantry: Pg = (P_world - base_t) @ base_R
     base_t: np.ndarray
     fx_fullres_px: float
 
+    def __getattr__(self, field_name):
+        # Preserve the established placements/texture gauge accessors.
+        legacy_field_aliases = {
+            "ppmm": "pixels_per_mm",
+            "W": "image_width",
+            "H": "image_height",
+        }
+        if field_name in legacy_field_aliases:
+            return getattr(self, legacy_field_aliases[field_name])
+        raise AttributeError(field_name)
+
     # --- linear pixel/mm maps (the texture image is linear in (u_mm, v_mm)) ---
-    def px_to_uv(self, i, j):
+    def px_to_uv(self, pixel_x, pixel_y):
         return (
-            self.umin + (np.asarray(i) + 0.5) / self.ppmm,
-            self.vmin + (np.asarray(j) + 0.5) / self.ppmm,
+            self.umin + (np.asarray(pixel_x) + 0.5) / self.pixels_per_mm,
+            self.vmin + (np.asarray(pixel_y) + 0.5) / self.pixels_per_mm,
         )
 
-    def uv_to_px(self, u, v):
+    def uv_to_px(self, texture_u, texture_v):
         return (
-            (np.asarray(u) - self.umin) * self.ppmm - 0.5,
-            (np.asarray(v) - self.vmin) * self.ppmm - 0.5,
+            (np.asarray(texture_u) - self.umin) * self.pixels_per_mm - 0.5,
+            (np.asarray(texture_v) - self.vmin) * self.pixels_per_mm - 0.5,
         )
 
 
@@ -67,19 +78,19 @@ def _parse_obj_v_vt(obj_path):
     with open(obj_path) as fh:
         for ln in fh:
             if ln.startswith("v "):
-                verts.append([float(x) for x in ln.split()[1:4]])
+                verts.append([float(world_x) for world_x in ln.split()[1:4]])
             elif ln.startswith("vt "):
-                texs.append([float(x) for x in ln.split()[1:3]])
+                texs.append([float(world_x) for world_x in ln.split()[1:3]])
             elif ln.startswith("f "):
                 for tok in ln.split()[1:]:
-                    a = tok.split("/")
-                    vi = int(a[0]) - 1
-                    ti = int(a[1]) - 1 if len(a) > 1 and a[1] else vi
+                    first_value = tok.split("/")
+                    vi = int(first_value[0]) - 1
+                    ti = int(first_value[1]) - 1 if len(first_value) > 1 and first_value[1] else vi
                     pairs[vi] = ti
     verts = np.array(verts)
     texs = np.array(texs)
     vi = np.array(sorted(pairs))
-    ti = np.array([pairs[k] for k in vi])
+    ti = np.array([pairs[item_index] for item_index in vi])
     return verts[vi], texs[ti]
 
 

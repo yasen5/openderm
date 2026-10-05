@@ -18,14 +18,28 @@ from .registration_geometry import undistort_image_points_to_normalized_camera
 # mesh build + exports
 # ----------------------------------------------------------------------------
 def build_surface_mesh(
-    surf, tp, tex_bounds, wacc, ppmm, mesh_pitch, up_sign, mesh_smooth=(0.0, 0.0)
+    surf,
+    texture_parameters,
+    tex_bounds,
+    wacc,
+    pixels_per_mm=None,
+    mesh_pitch=None,
+    up_sign=1.0,
+    mesh_smooth=(0.0, 0.0),
+    **legacy_options,
 ):
+    pixels_per_mm = legacy_options.pop("ppmm", pixels_per_mm)
+    if legacy_options:
+        unexpected_option = next(iter(legacy_options))
+        raise TypeError(f"build_surface_mesh got an unexpected keyword argument {unexpected_option!r}")
+    if pixels_per_mm is None or mesh_pitch is None:
+        raise TypeError("build_surface_mesh requires pixels_per_mm and mesh_pitch")
     umin, vmin, umax, vmax = tex_bounds
     us = np.arange(umin, umax + mesh_pitch, mesh_pitch)
     vs = np.arange(vmin, vmax + mesh_pitch, mesh_pitch)
     nx, ny = len(us), len(vs)
     Ug, Vg = np.meshgrid(us, vs)
-    Xg, Yg = tp.to_xy(Ug.ravel(), Vg.ravel())
+    Xg, Yg = texture_parameters.to_xy(Ug.ravel(), Vg.ravel())
     Zg = surf.height(Xg, Yg)
     nrm = surf.normal(Xg, Yg, up_sign).astype(np.float32)
     su, sv = mesh_smooth if mesh_smooth else (0.0, 0.0)
@@ -64,19 +78,21 @@ def build_surface_mesh(
         [(Ug.ravel() - umin) / (umax - umin), 1.0 - (Vg.ravel() - vmin) / (vmax - vmin)], 1
     ).astype(np.float32)
     # validity from texture coverage
-    H, W = wacc.shape
-    tu = np.clip(((Ug.ravel() - umin) * ppmm).astype(int), 0, W - 1)
-    tv = np.clip(((Vg.ravel() - vmin) * ppmm).astype(int), 0, H - 1)
+    image_height, image_width = wacc.shape
+    tu = np.clip(((Ug.ravel() - umin) * pixels_per_mm).astype(int), 0, image_width - 1)
+    tv = np.clip(((Vg.ravel() - vmin) * pixels_per_mm).astype(int), 0, image_height - 1)
     valid = wacc[tv, tu] > 0
 
     faces = []
-    for j in range(ny - 1):
-        a = j * nx + np.arange(nx - 1)
-        quads = np.stack([a, a + 1, a + nx, a + nx + 1], 1)
+    for neighbor_index in range(ny - 1):
+        first_vertex_indices = neighbor_index * nx + np.arange(nx - 1)
+        quads = np.stack(
+            [first_vertex_indices, first_vertex_indices + 1, first_vertex_indices + nx, first_vertex_indices + nx + 1], 1
+        )
         ok = valid[quads].all(1)
-        q = quads[ok]
-        faces.append(np.stack([q[:, 0], q[:, 1], q[:, 2]], 1))
-        faces.append(np.stack([q[:, 1], q[:, 3], q[:, 2]], 1))
+        valid_cell_vertex_indices = quads[ok]
+        faces.append(np.stack([valid_cell_vertex_indices[:, 0], valid_cell_vertex_indices[:, 1], valid_cell_vertex_indices[:, 2]], 1))
+        faces.append(np.stack([valid_cell_vertex_indices[:, 1], valid_cell_vertex_indices[:, 3], valid_cell_vertex_indices[:, 2]], 1))
     faces = np.concatenate(faces).astype(np.int64)
     print(f"      mesh: {len(pos)} verts ({nx}x{ny}), {len(faces)} tris")
     return pos, nrm, uvn, faces
@@ -113,28 +129,28 @@ def export_surface_mesh_obj(out_dir, pos, nrm, uvn, faces):
     print(f"      wrote {objp}")
 
 
-def export_surface_landmarks_ply(out_dir, X, track_err):
-    e = np.clip(track_err / max(track_err.max(), 1e-6), 0, 1)
-    col = np.stack([(e * 255), (1 - e) * 255, np.zeros_like(e)], 1).astype(np.uint8)
+def export_surface_landmarks_ply(out_dir, landmark_points, track_err):
+    reprojection_error = np.clip(track_err / max(track_err.max(), 1e-6), 0, 1)
+    col = np.stack([(reprojection_error * 255), (1 - reprojection_error) * 255, np.zeros_like(reprojection_error)], 1).astype(np.uint8)
     path = os.path.join(out_dir, "landmarks.ply")
     with open(path, "wb") as fh:
         fh.write(
             (
                 f"ply\nformat binary_little_endian 1.0\n"
-                f"element vertex {len(X)}\n"
+                f"element vertex {len(landmark_points)}\n"
                 "property float x\nproperty float y\nproperty float z\n"
                 "property uchar red\nproperty uchar green\nproperty uchar blue\n"
                 "end_header\n"
             ).encode()
         )
-        rec = np.zeros(len(X), dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
-        rec["xyz"] = X.astype(np.float32)
+        rec = np.zeros(len(landmark_points), dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
+        rec["xyz"] = landmark_points.astype(np.float32)
         rec["rgb"] = col
         fh.write(rec.tobytes())
     print(f"      wrote {path}")
 
 
-def render_reconstruction_overview_png(out_dir, frames, R, C, mdl, surf, X):
+def render_reconstruction_overview_png(out_dir, frames, camera_rotations, camera_centers, rig_model, surf, landmark_points):
     import matplotlib
 
     matplotlib.use("Agg")
@@ -147,15 +163,15 @@ def render_reconstruction_overview_png(out_dir, frames, R, C, mdl, surf, X):
     ax.plot_surface(
         Xs, Ys, surf.z[::step, ::step], alpha=0.35, color="tan", linewidth=0, antialiased=True
     )
-    sub = np.random.default_rng(0).permutation(len(X))[:4000]
-    ax.scatter(X[sub, 0], X[sub, 1], X[sub, 2], s=0.5, c="firebrick", alpha=0.4)
-    rows = np.array([f.row for f in frames])
+    sub = np.random.default_rng(0).permutation(len(landmark_points))[:4000]
+    ax.scatter(landmark_points[sub, 0], landmark_points[sub, 1], landmark_points[sub, 2], s=0.5, c="firebrick", alpha=0.4)
+    rows = np.array([frame.row for frame in frames])
     cmap = plt.colormaps["viridis"]
-    for f in frames:
-        cclr = cmap((f.row - rows.min()) / max(1, rows.max() - rows.min()))
-        ax.scatter(*C[f.idx], color=cclr, s=12)
-        tip = C[f.idx] + R[f.idx][:, 2] * mdl.depth(f) * 0.6
-        ax.plot(*np.stack([C[f.idx], tip], 1), color=cclr, lw=0.5, alpha=0.6)
+    for frame in frames:
+        cclr = cmap((frame.row - rows.min()) / max(1, rows.max() - rows.min()))
+        ax.scatter(*camera_centers[frame.idx], color=cclr, s=12)
+        tip = camera_centers[frame.idx] + camera_rotations[frame.idx][:, 2] * rig_model.depth(frame) * 0.6
+        ax.plot(*np.stack([camera_centers[frame.idx], tip], 1), color=cclr, lw=0.5, alpha=0.6)
     ax.set_xlabel("x (mm)")
     ax.set_ylabel("y (mm)")
     ax.set_zlabel("z (mm)")
@@ -181,7 +197,7 @@ def _b64(arr) -> str:
     return base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode()
 
 
-def export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, track_err, stats):
+def export_surface_viewer_html(out_dir, frames, camera_rotations, camera_centers, rig_model, pos, uvn, faces, landmark_points, track_err, stats):
     repo_libraries = Path(__file__).resolve().parents[2] / "third_party" / "threejs"
     installed_libraries = (
         Path(sysconfig.get_path("data")) / "share" / "openderm" / "third_party" / "threejs"
@@ -189,9 +205,9 @@ def export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, t
     libraries = repo_libraries if repo_libraries.is_dir() else installed_libraries
     three_b64 = orbit_b64 = ""
     for name, var in (("three.module.min.js", "three"), ("OrbitControls.js", "orbit")):
-        p = libraries / name
-        if p.is_file():
-            data = base64.b64encode(p.read_bytes()).decode()
+        point = libraries / name
+        if point.is_file():
+            data = base64.b64encode(point.read_bytes()).decode()
             if var == "three":
                 three_b64 = data
             else:
@@ -210,8 +226,8 @@ def export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, t
     tex_disk = cv2.imread(os.path.join(out_dir, "texture.jpg"), cv2.IMREAD_COLOR)
     max_dim = 16384
     if max(tex_disk.shape[:2]) > max_dim:
-        s = max_dim / max(tex_disk.shape[:2])
-        tex_disk = cv2.resize(tex_disk, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+        score = max_dim / max(tex_disk.shape[:2])
+        tex_disk = cv2.resize(tex_disk, None, fx=score, fy=score, interpolation=cv2.INTER_AREA)
         print(
             f"      (viewer texture downscaled to {tex_disk.shape[1]}x"
             f"{tex_disk.shape[0]} for WebGL; texture.jpg keeps full res)"
@@ -220,33 +236,41 @@ def export_surface_viewer_html(out_dir, frames, R, C, mdl, pos, uvn, faces, X, t
     tex_uri = "data:image/jpeg;base64," + base64.b64encode(buf.tobytes()).decode()
 
     # camera frusta line segments (8 per frame) + colors by row
-    rows = np.array([f.row for f in frames])
+    rows = np.array([frame.row for frame in frames])
     rspan = max(1, rows.max() - rows.min())
     seg_pts, seg_cols, centers = [], [], []
-    w, h = mdl.cx * 2, mdl.cy * 2
-    cpx = np.array([[0, 0], [w, 0], [w, h], [0, h]], float)
-    for f in frames:
-        Z = mdl.depth(f) * 0.35
-        xu = undistort_image_points_to_normalized_camera(cpx, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
-        xc = np.concatenate([xu * Z, np.full((4, 1), Z)], 1)
-        cw = xc @ R[f.idx].T + C[f.idx]
-        t = (f.row - rows.min()) / rspan
-        col = np.array([0.2 + 0.8 * t, 0.9 - 0.6 * t, 1.0 - 0.7 * t])
-        for k in range(4):
-            seg_pts += [C[f.idx], cw[k], cw[k], cw[(k + 1) % 4]]
-            seg_cols += [col, col, col, col]
-        centers.append(C[f.idx])
+    image_width, image_height = rig_model.cx * 2, rig_model.cy * 2
+    image_corners = np.array(
+        [[0, 0], [image_width, 0], [image_width, image_height], [0, image_height]], float
+    )
+    for frame in frames:
+        frustum_depth = rig_model.depth(frame) * 0.35
+        normalized_corner_points = undistort_image_points_to_normalized_camera(
+            image_corners, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy
+        )
+        camera_space_corners = np.concatenate(
+            [normalized_corner_points * frustum_depth, np.full((4, 1), frustum_depth)], 1
+        )
+        world_frustum_corners = camera_space_corners @ camera_rotations[frame.idx].T + camera_centers[frame.idx]
+        row_color_fraction = (frame.row - rows.min()) / rspan
+        row_color = np.array(
+            [0.2 + 0.8 * row_color_fraction, 0.9 - 0.6 * row_color_fraction, 1.0 - 0.7 * row_color_fraction]
+        )
+        for item_index in range(4):
+            seg_pts += [camera_centers[frame.idx], world_frustum_corners[item_index], world_frustum_corners[item_index], world_frustum_corners[(item_index + 1) % 4]]
+            seg_cols += [row_color, row_color, row_color, row_color]
+        centers.append(camera_centers[frame.idx])
     seg_pts = np.array(seg_pts, np.float32)
     seg_cols = np.array(seg_cols, np.float32)
 
-    sub = np.random.default_rng(0).permutation(len(X))[:40000]
-    e = np.clip(track_err[sub] / max(np.percentile(track_err, 95), 1e-6), 0, 1)
-    lm_col = np.stack([e, 1 - e, np.full_like(e, 0.15)], 1).astype(np.float32)
+    sub = np.random.default_rng(0).permutation(len(landmark_points))[:40000]
+    reprojection_error = np.clip(track_err[sub] / max(np.percentile(track_err, 95), 1e-6), 0, 1)
+    lm_col = np.stack([reprojection_error, 1 - reprojection_error, np.full_like(reprojection_error, 0.15)], 1).astype(np.float32)
 
     payload = dict(
         mesh=dict(positions=_b64(pos), uvs=_b64(uvn), indices=_b64(faces.astype(np.uint32))),
         texture=tex_uri,
-        landmarks=dict(positions=_b64(X[sub].astype(np.float32)), colors=_b64(lm_col)),
+        landmarks=dict(positions=_b64(landmark_points[sub].astype(np.float32)), colors=_b64(lm_col)),
         cameras=dict(
             segments=_b64(seg_pts),
             colors=_b64(seg_cols),

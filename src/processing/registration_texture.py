@@ -19,7 +19,7 @@ from .registration_surface import compute_camera_frame_surface_footprint
 # ----------------------------------------------------------------------------
 # ortho-texture rendering
 # ----------------------------------------------------------------------------
-def estimate_camera_frame_texture_gains(frames, mdl, obs_frame, obs_uv, obs_track, err=None, mode="on"):
+def estimate_camera_frame_texture_gains(frames, rig_model, obs_frame, obs_uv, obs_track, err=None, mode="on"):
     """Per-frame BGR gain fitted from BA track colors (photometric seams).
 
     The lamp travels with the camera, so the same skin patch renders up to
@@ -33,111 +33,121 @@ def estimate_camera_frame_texture_gains(frames, mdl, obs_frame, obs_uv, obs_trac
     mode 'on':    one scalar per channel per frame (frame-level lamp /
                   exposure offset). Returns (F,3) float32 BGR multipliers,
                   geometric mean 1 per channel (overall exposure preserved).
-    mode 'field': an affine log-gain field per frame g(x^,y^) = exp(g0 +
+    mode 'field': an affine log-gain field per frame g(x^,y^) = exp(frame_center_gains +
                   gx*x^ + gy*y^) in normalised image coords (x^,y^ in
                   [-0.5,0.5]) -- also corrects the within-frame shading /
                   vignetting gradient that a scalar cannot. Returns (F,3,3)
                   float32 log-coeffs [channel, (g0,gx,gy)]; the render
                   exponentiates per texel.
     """
-    RED = 8  # IMREAD_REDUCED_COLOR_8 decode factor
-    ok = np.ones(len(obs_frame), bool) if err is None else (err < 10.0)
-    zmean = float(np.mean([mdl.depth(f) for f in frames]))
+    reduced_decode_factor = 8  # IMREAD_REDUCED_COLOR_8 decode factor
+    reprojection_valid_mask = np.ones(len(obs_frame), bool) if err is None else (err < 10.0)
+    mean_camera_depth = float(np.mean([rig_model.depth(frame) for frame in frames]))
     # sample at the LF band's own scale (~2mm) so the gains describe exactly
     # the band they will correct
-    sig = max(2.0, 2.0 * (mdl.fx * mdl.downscale / zmean) / RED)
-    F = len(frames)
-    samples = np.zeros((len(obs_frame), 3), np.float32)
-    have = np.zeros(len(obs_frame), bool)
-    for f in frames:
-        sel = np.where((obs_frame == f.idx) & ok)[0]
-        if not len(sel):
+    blur_sigma_pixels = max(2.0, 2.0 * (rig_model.fx * rig_model.downscale / mean_camera_depth) / reduced_decode_factor)
+    frame_count = len(frames)
+    observed_bgr_samples = np.zeros((len(obs_frame), 3), np.float32)
+    valid_sample_mask = np.zeros(len(obs_frame), bool)
+    for frame in frames:
+        frame_observation_indices = np.where(
+            (obs_frame == frame.idx) & reprojection_valid_mask
+        )[0]
+        if not len(frame_observation_indices):
             continue
-        im = cv2.imread(f.image_path, cv2.IMREAD_REDUCED_COLOR_8 | cv2.IMREAD_IGNORE_ORIENTATION)
+        im = cv2.imread(frame.image_path, cv2.IMREAD_REDUCED_COLOR_8 | cv2.IMREAD_IGNORE_ORIENTATION)
         if im is None:
             continue
-        im = cv2.GaussianBlur(im.astype(np.float32), (0, 0), sig)
-        pt = obs_uv[sel] * (mdl.downscale / RED)
-        xi = np.clip(np.round(pt[:, 0]).astype(int), 0, im.shape[1] - 1)
-        yi = np.clip(np.round(pt[:, 1]).astype(int), 0, im.shape[0] - 1)
-        v = im[yi, xi]
-        good = (v.min(1) > 5.0) & (v.max(1) < 250.0)  # not clipped
-        samples[sel[good]] = v[good]
-        have[sel[good]] = True
-    fi = obs_frame[have]
-    ti = obs_track[have]
-    if len(fi) < 10 * F:
-        print(f"      ! LF gain: only {len(fi)} usable track colors -- skipping compensation")
+        im = cv2.GaussianBlur(im.astype(np.float32), (0, 0), blur_sigma_pixels)
+        reduced_observation_pixels = obs_uv[frame_observation_indices] * (
+            rig_model.downscale / reduced_decode_factor
+        )
+        pixel_x = np.clip(np.round(reduced_observation_pixels[:, 0]).astype(int), 0, im.shape[1] - 1)
+        pixel_y = np.clip(np.round(reduced_observation_pixels[:, 1]).astype(int), 0, im.shape[0] - 1)
+        sampled_bgr_values = im[pixel_y, pixel_x]
+        valid_color_mask = (sampled_bgr_values.min(1) > 5.0) & (sampled_bgr_values.max(1) < 250.0)  # not clipped
+        observed_bgr_samples[frame_observation_indices[valid_color_mask]] = sampled_bgr_values[valid_color_mask]
+        valid_sample_mask[frame_observation_indices[valid_color_mask]] = True
+    observed_frame_indices = obs_frame[valid_sample_mask]
+    observed_track_indices = obs_track[valid_sample_mask]
+    if len(observed_frame_indices) < 10 * frame_count:
+        print(f"      ! LF gain: only {len(observed_frame_indices)} usable track colors -- skipping compensation")
         return None
-    l = np.log(samples[have].clip(1.0, None))  # (M,3)
+    log_samples = np.log(observed_bgr_samples[valid_sample_mask].clip(1.0, None))  # (M,3)
     # normalised image coords of each obs (downscale cancels: ds px / ds dims)
-    xh = obs_uv[have, 0] / (2.0 * mdl.cx) - 0.5
-    yh = obs_uv[have, 1] / (2.0 * mdl.cy) - 0.5
-    B = np.stack([np.ones_like(xh), xh, yh], 1)  # (M, 3) field basis
-    nb = 1 if mode == "on" else 3
-    ntr = int(ti.max()) + 1
-    # model: l + G_f(x^,y^) ~= mu_t, G = log gain the render will apply
-    gam = np.zeros((F, 3, nb))
-    keep = np.ones(len(l), bool)
-    for it in range(16):
-        G = np.einsum("mcb,mb->mc", gam[fi], B[:, :nb])
-        mu = np.zeros((ntr, 3))
-        cnt = np.zeros(ntr)
-        np.add.at(mu, ti[keep], (l + G)[keep])
-        np.add.at(cnt, ti[keep], 1)
-        mu /= np.maximum(cnt, 1)[:, None]
-        t = mu[ti] - l  # per-obs target log-gain
-        gc = np.zeros(F)
-        np.add.at(gc, fi[keep], 1)
-        if nb == 1:
-            gs = np.zeros((F, 3))
-            np.add.at(gs, fi[keep], t[keep])
-            gam[:, :, 0] = gs / np.maximum(gc, 1)[:, None]
+    normalized_image_x = obs_uv[valid_sample_mask, 0] / (2.0 * rig_model.cx) - 0.5
+    normalized_image_y = obs_uv[valid_sample_mask, 1] / (2.0 * rig_model.cy) - 0.5
+    image_gain_basis = np.stack([np.ones_like(normalized_image_x), normalized_image_x, normalized_image_y], 1)  # (M, 3) field basis
+    basis_coefficient_count = 1 if mode == "on" else 3
+    track_count = int(observed_track_indices.max()) + 1
+    # model: log_samples + G_f(x^,y^) ~= mu_t, G = log gain the render will apply
+    log_gain_coefficients = np.zeros((frame_count, 3, basis_coefficient_count))
+    robust_observation_mask = np.ones(len(log_samples), bool)
+    for fit_iteration in range(16):
+        log_gain_correction = np.einsum("mcb,mb->mc", log_gain_coefficients[observed_frame_indices], image_gain_basis[:, :basis_coefficient_count])
+        track_mean_log_colors = np.zeros((track_count, 3))
+        track_observation_counts = np.zeros(track_count)
+        np.add.at(track_mean_log_colors, observed_track_indices[robust_observation_mask], (log_samples + log_gain_correction)[robust_observation_mask])
+        np.add.at(track_observation_counts, observed_track_indices[robust_observation_mask], 1)
+        track_mean_log_colors /= np.maximum(track_observation_counts, 1)[:, None]
+        target_log_gains = track_mean_log_colors[observed_track_indices] - log_samples  # per-observation target log-gain
+        frame_observation_counts = np.zeros(frame_count)
+        np.add.at(frame_observation_counts, observed_frame_indices[robust_observation_mask], 1)
+        if basis_coefficient_count == 1:
+            frame_log_gain_sums = np.zeros((frame_count, 3))
+            np.add.at(frame_log_gain_sums, observed_frame_indices[robust_observation_mask], target_log_gains[robust_observation_mask])
+            log_gain_coefficients[:, :, 0] = frame_log_gain_sums / np.maximum(frame_observation_counts, 1)[:, None]
         else:
-            for f in range(F):
-                s = keep & (fi == f)
-                m = int(s.sum())
-                if m < 12:
+            for frame_index in range(frame_count):
+                frame_observation_mask = robust_observation_mask & (observed_frame_indices == frame_index)
+                frame_observation_count = int(frame_observation_mask.sum())
+                if frame_observation_count < 12:
                     continue
-                Bf = B[s]
+                frame_basis = image_gain_basis[frame_observation_mask]
                 # ridge on the gradient terms only: a weak prior that wins
                 # when a frame's obs are clustered, negligible otherwise
-                lam = max(20.0, 0.02 * m)
-                N = Bf.T @ Bf + np.diag([1e-9, lam, lam])
-                gam[f] = np.linalg.solve(N, Bf.T @ t[s]).T
-        if it == 7:  # one robust trim
-            res = l + np.einsum("mcb,mb->mc", gam[fi], B[:, :nb]) - mu[ti]
-            keep &= np.abs(res).max(1) < 2.5 * (res.std() + 1e-6)
-    gam[:, :, 0] -= gam[:, :, 0].mean(0, keepdims=True)  # geometric mean 1
+                ridge_strength = max(20.0, 0.02 * frame_observation_count)
+                normal_matrix = frame_basis.T @ frame_basis + np.diag(
+                    [1e-9, ridge_strength, ridge_strength]
+                )
+                log_gain_coefficients[frame_index] = np.linalg.solve(
+                    normal_matrix, frame_basis.T @ target_log_gains[frame_observation_mask]
+                ).T
+        if fit_iteration == 7:  # one robust trim
+            log_gain_residuals = (
+                log_samples + np.einsum("mcb,mb->mc", log_gain_coefficients[observed_frame_indices], image_gain_basis[:, :basis_coefficient_count]) - track_mean_log_colors[observed_track_indices]
+            )
+            robust_observation_mask &= np.abs(log_gain_residuals).max(1) < 2.5 * (log_gain_residuals.std() + 1e-6)
+    log_gain_coefficients[:, :, 0] -= log_gain_coefficients[:, :, 0].mean(0, keepdims=True)  # geometric mean 1
     if mode == "on":
-        gains = np.exp(gam[:, :, 0]).astype(np.float32)
+        gains = np.exp(log_gain_coefficients[:, :, 0]).astype(np.float32)
         print(
-            f"      LF gain compensation: {int((gc > 0).sum())}/{F} frames "
-            f"from {int(keep.sum())} track colors, gain range "
+            f"      LF gain compensation: {int((frame_observation_counts > 0).sum())}/{frame_count} frames "
+            f"from {int(robust_observation_mask.sum())} track colors, gain range "
             f"{gains.min():.3f}..{gains.max():.3f}"
         )
         return gains
-    g0 = np.exp(gam[:, :, 0])
-    span = float(np.abs(gam[:, :, 1:]).max())
+    frame_center_gains = np.exp(log_gain_coefficients[:, :, 0])
+    max_gradient_magnitude = float(np.abs(log_gain_coefficients[:, :, 1:]).max())
     print(
-        f"      LF gain field: {int((gc > 0).sum())}/{F} frames from "
-        f"{int(keep.sum())} track colors, centre gain {g0.min():.3f}.."
-        f"{g0.max():.3f}, max |gradient| {span:.3f}/half-image"
+        f"      LF gain field: {int((frame_observation_counts > 0).sum())}/{frame_count} frames from "
+        f"{int(robust_observation_mask.sum())} track colors, centre gain {frame_center_gains.min():.3f}.."
+        f"{frame_center_gains.max():.3f}, max |gradient| {max_gradient_magnitude:.3f}/half-image"
     )
-    return gam.astype(np.float32)
+    return log_gain_coefficients.astype(np.float32)
 
 
-def compute_texture_bounds(frames, R, C, mdl, surf, tp, ppmm):
+def compute_texture_bounds(frames, camera_rotations, camera_centers, rig_model, surf, texture_parameters, pixels_per_mm):
     """Return frame footprints and the landmark-supported texture canvas."""
     foot_uv = {}
     umin = vmin = np.inf
     umax = vmax = -np.inf
-    for f in frames:
-        P = compute_camera_frame_surface_footprint(f, R, C, mdl, surf)
-        u, v = tp.to_uv(P[:, 0], P[:, 1])
-        foot_uv[f.idx] = np.stack([u, v], 1)
-        umin, umax = min(umin, u.min()), max(umax, u.max())
-        vmin, vmax = min(vmin, v.min()), max(vmax, v.max())
+    for descriptive_frame in frames:
+        descriptive_points = compute_camera_frame_surface_footprint(descriptive_frame, camera_rotations, camera_centers, rig_model, surf)
+        texture_u, texture_v = texture_parameters.to_uv(descriptive_points[:, 0], descriptive_points[:, 1])
+        foot_uv[descriptive_frame.idx] = np.stack([texture_u, texture_v], 1)
+        umin, umax = min(umin, texture_u.min()), max(umax, texture_u.max())
+        vmin, vmax = min(vmin, texture_v.min()), max(vmax, texture_v.max())
     pad = 1.0
     umin -= pad
     vmin -= pad
@@ -146,28 +156,28 @@ def compute_texture_bounds(frames, R, C, mdl, surf, tp, ppmm):
     # clamp to the landmark-supported surface region (no textured extrapolation)
     sy_i, sx_i = np.where(surf.support)
     if len(sx_i):
-        su, sv = tp.to_uv(surf.xs[sx_i], surf.ys[sy_i])
+        su, sv = texture_parameters.to_uv(surf.xs[sx_i], surf.ys[sy_i])
         umin = max(umin, su.min() - pad)
         umax = min(umax, su.max() + pad)
         vmin = max(vmin, sv.min() - pad)
         vmax = min(vmax, sv.max() + pad)
-    W = int(math.ceil((umax - umin) * ppmm))
-    H = int(math.ceil((vmax - vmin) * ppmm))
+    texture_width = int(math.ceil((umax - umin) * pixels_per_mm))
+    texture_height = int(math.ceil((vmax - vmin) * pixels_per_mm))
     print(
-        f"      texture canvas {W}x{H} @ {ppmm}px/mm "
+        f"      texture canvas {texture_width}x{texture_height} @ {pixels_per_mm}px/mm "
         f"(u: {umin:.0f}..{umax:.0f}, v: {vmin:.0f}..{vmax:.0f} mm)"
     )
-    return foot_uv, (umin, vmin, umax, vmax), W, H
+    return foot_uv, (umin, vmin, umax, vmax), texture_width, texture_height
 
 
 def prepare_texture_render_state(
     frames,
-    R,
-    C,
-    mdl,
+    camera_rotations,
+    camera_centers,
+    rig_model,
     surf,
-    tp,
-    ppmm,
+    texture_parameters,
+    pixels_per_mm,
     up_sign,
     blend_sharpness,
     blend_mode,
@@ -176,8 +186,8 @@ def prepare_texture_render_state(
     device,
     foot_uv,
     bounds,
-    W,
-    H,
+    texture_width,
+    texture_height,
 ):
     """Allocate canvases and initialize the optional GPU geometry pipeline."""
     umin, vmin, umax, vmax = bounds
@@ -198,8 +208,8 @@ def prepare_texture_render_state(
             gpu = GpuFramePipe(blend_mode)
             if os.environ.get("SKINMAP_NO_VRAM_CANVAS"):
                 print("      render device: cuda (torch), canvases in RAM (SKINMAP_NO_VRAM_CANVAS)")
-            elif gpu.canvas_fits(H, W):
-                gpu.canvases_begin(H, W)
+            elif gpu.canvas_fits(texture_height, texture_width):
+                gpu.canvases_begin(texture_height, texture_width)
                 print("      render device: cuda (torch), canvases in VRAM")
             else:
                 print(
@@ -213,11 +223,11 @@ def prepare_texture_render_state(
     # registration can inflate the arc-length canvas enormously; dying to the
     # kernel OOM killer takes innocent processes with it, so abort cleanly
     per_texel = 32 if blend_mode == "two-band" else 16
-    need = float(H) * W * per_texel
+    need = float(texture_height) * texture_width * per_texel
     avail_ram = _get_available_system_memory_bytes()
     if need > 0.6 * avail_ram:
         sys.exit(
-            f"      ! texture canvases for {W}x{H} need {need / 1e9:.1f} GB "
+            f"      ! texture canvases for {texture_width}x{texture_height} need {need / 1e9:.1f} GB "
             f"but only {avail_ram / 1e9:.1f} GB RAM is available -- "
             "aborting before the OOM killer does it for us. A canvas "
             "this large usually means a degenerate registration "
@@ -225,21 +235,21 @@ def prepare_texture_render_state(
         )
     acc = wacc = hf_best = w_best = None
     if not gpu_canvas:
-        acc = np.zeros((H, W, 3), np.float32)
-        wacc = np.zeros((H, W), np.float32)
+        acc = np.zeros((texture_height, texture_width, 3), np.float32)
+        wacc = np.zeros((texture_height, texture_width), np.float32)
     if blend_mode == "two-band" and not gpu_canvas:
         # high frequencies are never averaged: per texel the argmax-weight
         # frame contributes them alone; only the low-pass (illumination) band
         # is soft-blended, which hides photometric seams without losing detail
-        hf_best = np.zeros((H, W, 3), np.float32)
-        w_best = np.zeros((H, W), np.float32)
+        hf_best = np.zeros((texture_height, texture_width, 3), np.float32)
+        w_best = np.zeros((texture_height, texture_width), np.float32)
 
-    fxf = mdl.fx * mdl.downscale
-    k1 = mdl.k1
-    cxf, cyf = mdl.cx * mdl.downscale, mdl.cy * mdl.downscale
+    fxf = rig_model.fx * rig_model.downscale
+    k1 = rig_model.k1
+    cxf, cyf = rig_model.cx * rig_model.downscale, rig_model.cy * rig_model.downscale
     Wf, Hf = cxf * 2, cyf * 2
-    img_pxmm = fxf / np.mean([mdl.depth(f) for f in frames])
-    sscale = min(1.0, 1.4 * ppmm / img_pxmm)
+    img_pxmm = fxf / np.mean([rig_model.depth(descriptive_frame) for descriptive_frame in frames])
+    sscale = min(1.0, 1.4 * pixels_per_mm / img_pxmm)
 
     # geometry decimation: the per-texel fields geom() computes (projected
     # image coords, spline height, weights) are all smooth at the surface-grid
@@ -248,7 +258,7 @@ def prepare_texture_render_state(
     # render (minutes/frame). Evaluate on a ~20px/mm grid (q texels) and
     # bilinearly upsample: placement error << the solve rms, ~16x faster.
     # q=1 at <=20px/mm uses the exact per-texel path.
-    geo_q = max(1, int(round(ppmm / 20.0)))
+    geo_q = max(1, int(round(pixels_per_mm / 20.0)))
 
     # geometry fields on CUDA: same math as geom() below (float64), evaluated
     # on the GPU and never leaving it -- geom dominated the GPU render's wall
@@ -259,9 +269,9 @@ def prepare_texture_render_state(
 
         gpu_geom = GpuGeom(
             surf,
-            tp,
-            R,
-            C,
+            texture_parameters,
+            camera_rotations,
+            camera_centers,
             fxf,
             k1,
             cxf,
@@ -275,12 +285,12 @@ def prepare_texture_render_state(
         )
     return SimpleNamespace(
         frames=frames,
-        R=R,
-        C=C,
-        mdl=mdl,
+        R=camera_rotations,
+        C=camera_centers,
+        rig_model=rig_model,
         surf=surf,
-        tp=tp,
-        ppmm=ppmm,
+        texture_parameters=texture_parameters,
+        pixels_per_mm=pixels_per_mm,
         up_sign=up_sign,
         blend_sharpness=blend_sharpness,
         blend_mode=blend_mode,
@@ -288,8 +298,8 @@ def prepare_texture_render_state(
         warp=warp,
         foot_uv=foot_uv,
         bounds=bounds,
-        W=W,
-        H=H,
+        texture_width=texture_width,
+        texture_height=texture_height,
         umin=umin,
         vmin=vmin,
         umax=umax,
@@ -317,23 +327,23 @@ def prepare_texture_render_state(
 def compute_camera_frame_surface_projection(state, frame, upsample=True):
     """Project one frame and calculate its geometric blend weights."""
     fp = state.foot_uv[frame.idx]
-    umin, vmin, ppmm = state.umin, state.vmin, state.ppmm
-    W, H, q = state.W, state.H, state.geo_q
-    u0 = max(0, int((fp[:, 0].min() - umin - 1) * ppmm))
-    u1 = min(W, int((fp[:, 0].max() - umin + 1) * ppmm) + 1)
-    v0 = max(0, int((fp[:, 1].min() - vmin - 1) * ppmm))
-    v1 = min(H, int((fp[:, 1].max() - vmin + 1) * ppmm) + 1)
+    umin, vmin, pixels_per_mm = state.umin, state.vmin, state.ppmm
+    texture_width, texture_height, geometry_query_stride = state.W, state.H, state.geo_q
+    u0 = max(0, int((fp[:, 0].min() - umin - 1) * pixels_per_mm))
+    u1 = min(texture_width, int((fp[:, 0].max() - umin + 1) * pixels_per_mm) + 1)
+    v0 = max(0, int((fp[:, 1].min() - vmin - 1) * pixels_per_mm))
+    v1 = min(texture_height, int((fp[:, 1].max() - vmin + 1) * pixels_per_mm) + 1)
     if u1 <= u0 or v1 <= v0:
         return None
-    if q > 1:
-        wd = max(2, -(-(u1 - u0) // q))
-        hd = max(2, -(-(v1 - v0) // q))
-        uu = umin + (u0 + (np.arange(wd) + 0.5) * q) / ppmm
-        vv = vmin + (v0 + (np.arange(hd) + 0.5) * q) / ppmm
+    if geometry_query_stride > 1:
+        wd = max(2, -(-(u1 - u0) // geometry_query_stride))
+        hd = max(2, -(-(v1 - v0) // geometry_query_stride))
+        uu = umin + (u0 + (np.arange(wd) + 0.5) * geometry_query_stride) / pixels_per_mm
+        vv = vmin + (v0 + (np.arange(hd) + 0.5) * geometry_query_stride) / pixels_per_mm
     else:
         wd, hd = u1 - u0, v1 - v0
-        uu = umin + (np.arange(u0, u1) + 0.5) / ppmm
-        vv = vmin + (np.arange(v0, v1) + 0.5) / ppmm
+        uu = umin + (np.arange(u0, u1) + 0.5) / pixels_per_mm
+        vv = vmin + (np.arange(v0, v1) + 0.5) / pixels_per_mm
     if not upsample and state.gpu_geom is not None:
         try:
             dec = state.gpu_geom.fields(frame.idx, uu, vv)
@@ -350,20 +360,36 @@ def compute_camera_frame_surface_projection(state, frame, upsample=True):
     if state.warp is not None:
         Mu, Mv, umid, vmid = state.warp
         du, dv = Uw - umid, Vw - vmid
-        a = Mu[frame.idx]
-        bvp = Mv[frame.idx]
-        cu_ = a[0] * du + a[1] * dv + a[2]
-        cv_ = bvp[0] * du + bvp[1] * dv + bvp[2]
-        if len(a) == 6:
+        horizontal_warp_coefficients = Mu[frame.idx]
+        vertical_warp_coefficients = Mv[frame.idx]
+        horizontal_warp = (
+            horizontal_warp_coefficients[0] * du
+            + horizontal_warp_coefficients[1] * dv
+            + horizontal_warp_coefficients[2]
+        )
+        vertical_warp = (
+            vertical_warp_coefficients[0] * du
+            + vertical_warp_coefficients[1] * dv
+            + vertical_warp_coefficients[2]
+        )
+        if len(horizontal_warp_coefficients) == 6:
             q0, q1, q2 = du * du / 50.0, du * dv / 50.0, dv * dv / 50.0
-            cu_ += a[3] * q0 + a[4] * q1 + a[5] * q2
-            cv_ += bvp[3] * q0 + bvp[4] * q1 + bvp[5] * q2
-        Uw, Vw = Uw - cu_, Vw - cv_
+            horizontal_warp += (
+                horizontal_warp_coefficients[3] * q0
+                + horizontal_warp_coefficients[4] * q1
+                + horizontal_warp_coefficients[5] * q2
+            )
+            vertical_warp += (
+                vertical_warp_coefficients[3] * q0
+                + vertical_warp_coefficients[4] * q1
+                + vertical_warp_coefficients[5] * q2
+            )
+        Uw, Vw = Uw - horizontal_warp, Vw - vertical_warp
     Xg, Yg = state.tp.to_xy(Uw, Vw)
     Zg = state.surf.height(Xg, Yg)
-    P = np.stack([Xg, Yg, Zg], 1)
+    descriptive_points = np.stack([Xg, Yg, Zg], 1)
     uv, zc = project_world_points_into_camera(
-        P,
+        descriptive_points,
         state.R[frame.idx],
         state.C[frame.idx],
         state.fxf,
@@ -400,10 +426,10 @@ def compute_camera_frame_surface_projection(state, frame, upsample=True):
         np.exp(-state.blend_sharpness * 0.5 * r2c),
         0.02,
     )
-    vs = valid * state.surf.supported(P[:, 0], P[:, 1])
+    vs = valid * state.surf.supported(descriptive_points[:, 0], descriptive_points[:, 1])
     if state.max_incidence_deg > 0:
-        nrm = state.surf.normal(P[:, 0], P[:, 1], state.up_sign)
-        ray = P - state.C[frame.idx][None, :]
+        nrm = state.surf.normal(descriptive_points[:, 0], descriptive_points[:, 1], state.up_sign)
+        ray = descriptive_points - state.C[frame.idx][None, :]
         ray /= np.maximum(np.linalg.norm(ray, axis=1, keepdims=True), 1e-9)
         cosi = np.abs(np.sum(nrm * ray, axis=1))
         c_hi = math.cos(math.radians(max(state.max_incidence_deg - 15.0, 1.0)))
@@ -415,7 +441,7 @@ def compute_camera_frame_surface_projection(state, frame, upsample=True):
     mapy = uv[:, 1].astype(np.float32).reshape(hd, wd)
     if not upsample:
         return (u0, u1, v0, v1), np.stack([mapx, mapy, wgt2d, soft2d])
-    if q > 1:
+    if geometry_query_stride > 1:
         size = (u1 - u0, v1 - v0)
         mapx = cv2.resize(mapx, size, interpolation=cv2.INTER_LINEAR)
         mapy = cv2.resize(mapy, size, interpolation=cv2.INTER_LINEAR)
@@ -429,7 +455,7 @@ def build_texture_ownership_by_frame_group(state, frame_group):
     if frame_group is None:
         return None, {}, []
     frames, gpu = state.frames, state.gpu
-    H, W = state.H, state.W
+    texture_height, texture_width = state.H, state.W
     started = time.time()
     gids = sorted(set(frame_group.values()))
     geo_cache = {}
@@ -437,7 +463,7 @@ def build_texture_ownership_by_frame_group(state, frame_group):
     gpu_own = False
     if gpu is not None:
         try:
-            gpu.ownership_begin(H, W)
+            gpu.ownership_begin(texture_height, texture_width)
             gpu_own = True
         except Exception as exc:
             print(f"      ! ownership fields don't fit VRAM ({exc}); streaming ownership on CPU")
@@ -454,15 +480,15 @@ def build_texture_ownership_by_frame_group(state, frame_group):
             gpu.ownership_add(frame_group[frame.idx], rect, decimated[2])
         best_group = gpu.ownership_finish()
     else:
-        own_max = np.zeros((H, W), np.float32)
-        own_arg = np.full((H, W), -1, np.int32)
-        own_sum = np.zeros((H, W), np.float32)
+        own_max = np.zeros((texture_height, texture_width), np.float32)
+        own_arg = np.full((texture_height, texture_width), -1, np.int32)
+        own_sum = np.zeros((texture_height, texture_width), np.float32)
         current_group = None
         for frame in ordered:
             result = compute_camera_frame_surface_projection(state, frame)
             if result is None:
                 continue
-            (u0, u1, v0, v1), _, _, weight, _ = result
+            (u0, u1, v0, v1), low_frequency_texture, high_frequency_texture, blend_weight, coverage_mask = result
             group = frame_group[frame.idx]
             if current_group is not None and group != current_group:
                 wins = own_sum > own_max
@@ -470,7 +496,7 @@ def build_texture_ownership_by_frame_group(state, frame_group):
                 own_arg[wins] = current_group
                 own_sum[...] = 0.0
             current_group = group
-            own_sum[v0:v1, u0:u1] += weight
+            own_sum[v0:v1, u0:u1] += blend_weight
         if current_group is not None:
             wins = own_sum > own_max
             own_arg[wins] = current_group
@@ -483,16 +509,16 @@ def compute_low_frequency_group_blend_gates(
     best_group,
     gids,
     group_feather_mm,
-    ppmm,
-    W,
-    H,
+    pixels_per_mm,
+    texture_width,
+    texture_height,
 ):
     """Build feathered, partition-of-unity gates for low-frequency blending."""
     if best_group is None or group_feather_mm <= 0:
         return None
-    sigma = group_feather_mm * ppmm
+    sigma = group_feather_mm * pixels_per_mm
     reduction = max(1, int(round(sigma / 12.0)))
-    small_w, small_h = max(1, W // reduction), max(1, H // reduction)
+    small_w, small_h = max(1, texture_width // reduction), max(1, texture_height // reduction)
     gates = []
     for group in gids:
         mask = (best_group == group).astype(np.float32)
@@ -504,7 +530,7 @@ def compute_low_frequency_group_blend_gates(
     for group, mask in zip(gids, gates):
         mask /= gate_sum
         if reduction > 1:
-            mask = cv2.resize(mask, (W, H), interpolation=cv2.INTER_LINEAR)
+            mask = cv2.resize(mask, (texture_width, texture_height), interpolation=cv2.INTER_LINEAR)
         result[group] = np.clip(mask * 255.0, 0, 255).astype(np.uint8)
     print(f"      LF group gates feathered at {group_feather_mm:.0f}mm")
     return result
@@ -658,7 +684,7 @@ def accumulate_camera_frames_into_texture(
                     best_g=owner,
                     gid=frame_group[frame.idx] if frame_group else 0,
                     lf_gate=gate,
-                    ppmm=state.ppmm,
+                    pixels_per_mm=state.ppmm,
                     hf_coherence_mm=hf_coherence_mm,
                     gain=None if frame_gain is None else frame_gain[frame.idx],
                 )
@@ -709,7 +735,7 @@ def accumulate_camera_frames_into_texture(
         log_texture_render_profile_tick(profile, "cpu", step_started)
         print_texture_render_progress(frame, state.frames, started, profile)
     if state.gpu_canvas:
-        state.acc, state.wacc, high_gpu, _ = state.gpu.canvases_take()
+        state.acc, state.wacc, high_gpu, high_frequency_weight = state.gpu.canvases_take()
         if high_gpu is not None:
             state.hf_best = high_gpu
 
@@ -791,12 +817,12 @@ def write_texture_outputs(state, out_dir):
 
 def render_surface_texture(
     frames,
-    R,
-    C,
-    mdl,
+    camera_rotations,
+    camera_centers,
+    rig_model,
     surf,
-    tp,
-    ppmm,
+    texture_parameters,
+    pixels_per_mm,
     up_sign,
     out_dir,
     blend_sharpness=100.0,
@@ -812,15 +838,15 @@ def render_surface_texture(
     frame_gain=None,
 ):
     """Render the registered captures through bounded, independently testable stages."""
-    foot_uv, bounds, width, height = compute_texture_bounds(frames, R, C, mdl, surf, tp, ppmm)
+    foot_uv, bounds, width, height = compute_texture_bounds(frames, camera_rotations, camera_centers, rig_model, surf, texture_parameters, pixels_per_mm)
     state = prepare_texture_render_state(
         frames,
-        R,
-        C,
-        mdl,
+        camera_rotations,
+        camera_centers,
+        rig_model,
         surf,
-        tp,
-        ppmm,
+        texture_parameters,
+        pixels_per_mm,
         up_sign,
         blend_sharpness,
         blend_mode,
@@ -834,7 +860,7 @@ def render_surface_texture(
     )
     best_group, geometry_cache, group_ids = build_texture_ownership_by_frame_group(state, frame_group)
     low_frequency_gates = compute_low_frequency_group_blend_gates(
-        best_group, group_ids, group_feather_mm, ppmm, width, height
+        best_group, group_ids, group_feather_mm, pixels_per_mm, width, height
     )
     accumulate_camera_frames_into_texture(
         state,

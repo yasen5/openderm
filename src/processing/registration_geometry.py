@@ -32,43 +32,43 @@ class RigModel:
 
     def poses(self, frames) -> tuple[np.ndarray, np.ndarray]:
         """Nominal (R_cam2world (n,3,3), C (n,3)) for every frame."""
-        n = len(frames)
-        R = np.zeros((n, 3, 3))
-        C = np.zeros((n, 3))
-        for f in frames:
-            Rrx = Rotation.from_rotvec([self.sign * f.rx, 0, 0]).as_matrix()
-            C[f.idx] = self.base_t + self.base_R @ (f.g + Rrx @ self.lever)
-            R[f.idx] = self.base_R @ Rrx @ self.Rm
-        return R, C
+        frame_count = len(frames)
+        camera_rotations = np.zeros((frame_count, 3, 3))
+        camera_centers = np.zeros((frame_count, 3))
+        for frame in frames:
+            Rrx = Rotation.from_rotvec([self.sign * frame.rx, 0, 0]).as_matrix()
+            camera_centers[frame.idx] = self.base_t + self.base_R @ (frame.g + Rrx @ self.lever)
+            camera_rotations[frame.idx] = self.base_R @ Rrx @ self.Rm
+        return camera_rotations, camera_centers
 
-    def depth(self, f: Frame) -> float:
-        return f.standoff + self.dz0
+    def depth(self, frame) -> float:
+        return frame.standoff + self.dz0
 
 
-def project_world_points_into_camera(X, Rcw, C, fx, k1, cx, cy):
+def project_world_points_into_camera(landmark_points, camera_to_world_rotation, camera_centers, focal_length_px, k1, principal_point_x, principal_point_y):
     """World pts (N,3) -> pixel (N,2) + cam-z (N,). Rcw: cam->world 3x3."""
-    xc = (X - C) @ Rcw  # = Rcw^T (X - C)
-    z = np.maximum(xc[:, 2], 1e-6)
-    xn = xc[:, :2] / z[:, None]
-    r2 = (xn**2).sum(1)
-    f = 1.0 + k1 * r2
-    uv = np.empty_like(xn)
-    uv[:, 0] = fx * xn[:, 0] * f + cx
-    uv[:, 1] = fx * xn[:, 1] * f + cy
-    return uv, xc[:, 2]
+    camera_points = (landmark_points - camera_centers) @ camera_to_world_rotation  # = Rcw^T (X - C)
+    camera_depth = np.maximum(camera_points[:, 2], 1e-6)
+    normalized_image_points = camera_points[:, :2] / camera_depth[:, None]
+    normalized_radius_squared = (normalized_image_points**2).sum(1)
+    radial_distortion_factor = 1.0 + k1 * normalized_radius_squared
+    image_points = np.empty_like(normalized_image_points)
+    image_points[:, 0] = focal_length_px * normalized_image_points[:, 0] * radial_distortion_factor + principal_point_x
+    image_points[:, 1] = focal_length_px * normalized_image_points[:, 1] * radial_distortion_factor + principal_point_y
+    return image_points, camera_points[:, 2]
 
 
 def undistort_image_points_to_normalized_camera(uv, fx, k1, cx, cy):
     """Pixel (N,2) -> normalised undistorted (N,2)."""
     xn = (uv - [cx, cy]) / fx
     xu = xn.copy()
-    for _ in range(3):
+    for iteration_index in range(3):
         r2 = (xu**2).sum(1)
         xu = xn / (1.0 + k1 * r2)[:, None]
     return xu
 
 
-def estimate_initial_rig_camera_model(frames, cpairs, w, h, downscale, fx0) -> tuple[RigModel, float]:
+def estimate_initial_rig_camera_model(frames, consecutive_pairs, image_width, image_height, downscale, initial_focal_length_px) -> tuple[RigModel, float]:
     """Fit the mechanical rig model from consecutive-pair affine transforms.
 
     The focal-length estimate here is an initialization for the mechanical fit;
@@ -76,176 +76,204 @@ def estimate_initial_rig_camera_model(frames, cpairs, w, h, downscale, fx0) -> t
     points per pair capture translation, rotation, and scale of the measured
     affine.
     """
-    cx, cy = w / 2.0, h / 2.0
-    samp = np.array(
+    cx, cy = image_width / 2.0, image_height / 2.0
+    sample_image_points = np.array(
         [
             [cx, cy],
-            [cx - w / 4, cy - h / 4],
-            [cx + w / 4, cy - h / 4],
-            [cx + w / 4, cy + h / 4],
-            [cx - w / 4, cy + h / 4],
+            [cx - image_width / 4, cy - image_height / 4],
+            [cx + image_width / 4, cy - image_height / 4],
+            [cx + image_width / 4, cy + image_height / 4],
+            [cx - image_width / 4, cy + image_height / 4],
         ],
         float,
     )
 
     # measured destinations of the sample points under each pair's affine
-    meas = []
-    for p in cpairs:
-        th = math.radians(p.rot_deg)
-        c, s = p.scale * math.cos(th), p.scale * math.sin(th)
-        A = np.array([[c, -s, p.tx], [s, c, p.ty]])
-        meas.append(samp @ A[:, :2].T + A[:, 2])
-    meas = np.array(meas)  # (npair, 5, 2)
+    measured_image_positions = []
+    for consecutive_pair in consecutive_pairs:
+        pair_rotation_radians = math.radians(consecutive_pair.rot_deg)
+        cosine_component = consecutive_pair.scale * math.cos(pair_rotation_radians)
+        sine_component = consecutive_pair.scale * math.sin(pair_rotation_radians)
+        pair_affine = np.array(
+            [[cosine_component, -sine_component, consecutive_pair.tx], [sine_component, cosine_component, consecutive_pair.ty]]
+        )
+        measured_image_positions.append(sample_image_points @ pair_affine[:, :2].T + pair_affine[:, 2])
+    measured_image_positions = np.array(measured_image_positions)  # (npair, 5, 2)
 
-    g = np.array([f.g for f in frames])
-    rx = np.array([f.rx for f in frames])
-    so = np.array([f.standoff for f in frames])
-    ii = np.array([p.i for p in cpairs])
-    jj = np.array([p.j for p in cpairs])
+    gantry_positions = np.array([frame.g for frame in frames])
+    frame_x_rotation_angles = np.array([frame.rx for frame in frames])
+    frame_standoff_measurements = np.array([frame.standoff for frame in frames])
+    pair_first_frame_indices = np.array([consecutive_pair.i for consecutive_pair in consecutive_pairs])
+    pair_second_frame_indices = np.array([consecutive_pair.j for consecutive_pair in consecutive_pairs])
 
-    def base_rm(psi_deg, roll_deg):
-        zc = np.array([0, 0, -1.0])
-        r = math.radians(roll_deg)
-        xc = np.array([math.cos(r), math.sin(r), 0.0])
-        yc = np.cross(zc, xc)
-        B = np.stack([xc, yc, zc], axis=1)
-        return Rotation.from_rotvec([math.radians(psi_deg), 0, 0]).as_matrix() @ B
+    def build_initial_camera_mount_rotation(optical_axis_tilt_degrees, camera_roll_degrees):
+        camera_forward_axis = np.array([0, 0, -1.0])
+        camera_roll_radians = math.radians(camera_roll_degrees)
+        camera_space_points = np.array([math.cos(camera_roll_radians), math.sin(camera_roll_radians), 0.0])
+        camera_up_axis = np.cross(camera_forward_axis, camera_space_points)
+        camera_mount_basis = np.stack([camera_space_points, camera_up_axis, camera_forward_axis], axis=1)
+        return Rotation.from_rotvec([math.radians(optical_axis_tilt_degrees), 0, 0]).as_matrix() @ camera_mount_basis
 
-    def resid_for(sign, Rm_init):
-        Rrx = Rotation.from_rotvec(np.outer(sign * rx, [1, 0, 0])).as_matrix()
+    def build_pair_reprojection_residual_function(frame_rotation_sign, initial_mount_rotation):
+        frame_x_rotations = Rotation.from_rotvec(np.outer(frame_rotation_sign * frame_x_rotation_angles, [1, 0, 0])).as_matrix()
 
-        def resid(p):
-            fx, dz0 = p[0], p[1]
-            lever = p[2:5]
-            Rm = Rm_init @ Rotation.from_rotvec(p[5:8]).as_matrix()
-            C = g + Rrx @ lever  # (n,3)
-            R = np.einsum("nij,jk->nik", Rrx, Rm)  # cam->world
-            Zi = so[ii] + dz0  # (npair,)
-            xu = (samp - [cx, cy]) / fx  # (5,2)
-            xc = np.empty((len(ii), 5, 3))
-            xc[:, :, :2] = xu[None] * Zi[:, None, None]
-            xc[:, :, 2] = Zi[:, None]
-            Xw = np.einsum("pij,pkj->pki", R[ii], xc) + C[ii][:, None, :]
-            d = Xw - C[jj][:, None, :]
-            xcj = np.einsum("pki,pij->pkj", d, R[jj])
-            z = np.maximum(xcj[:, :, 2], 1e-6)
-            uv = fx * xcj[:, :, :2] / z[..., None] + [cx, cy]
-            res = (uv - meas).ravel() / 3.0
-            prior = np.concatenate([[(dz0 - 50.0) / 100.0], lever / 200.0, p[5:8] / 0.5])
-            return np.concatenate([res, prior])
+        def compute_reprojection_residuals(parameter_vector):
+            focal_length_px, depth_offset_mm = parameter_vector[0], parameter_vector[1]
+            lever = parameter_vector[2:5]
+            camera_mount_rotation = initial_mount_rotation @ Rotation.from_rotvec(parameter_vector[5:8]).as_matrix()
+            camera_centers = gantry_positions + frame_x_rotations @ lever  # (n,3)
+            camera_rotations = np.einsum("nij,jk->nik", frame_x_rotations, camera_mount_rotation)  # cam->world
+            pair_camera_depths = frame_standoff_measurements[pair_first_frame_indices] + depth_offset_mm  # (npair,)
+            normalized_image_points = (sample_image_points - [cx, cy]) / focal_length_px  # (5,2)
+            camera_space_points = np.empty((len(pair_first_frame_indices), 5, 3))
+            camera_space_points[:, :, :2] = normalized_image_points[None] * pair_camera_depths[:, None, None]
+            camera_space_points[:, :, 2] = pair_camera_depths[:, None]
+            world_sample_points = np.einsum("pij,pkj->pki", camera_rotations[pair_first_frame_indices], camera_space_points) + camera_centers[pair_first_frame_indices][:, None, :]
+            distance = world_sample_points - camera_centers[pair_second_frame_indices][:, None, :]
+            neighbor_camera_points = np.einsum("pki,pij->pkj", distance, camera_rotations[pair_second_frame_indices])
+            camera_depths = np.maximum(neighbor_camera_points[:, :, 2], 1e-6)
+            projected_image_points = focal_length_px * neighbor_camera_points[:, :, :2] / camera_depths[..., None] + [cx, cy]
+            reprojection_residuals = (projected_image_points - measured_image_positions).ravel() / 3.0
+            parameter_prior_residuals = np.concatenate([[(depth_offset_mm - 50.0) / 100.0], lever / 200.0, parameter_vector[5:8] / 0.5])
+            return np.concatenate([reprojection_residuals, parameter_prior_residuals])
 
-        return resid
+        return compute_reprojection_residuals
 
     # dz0 can be large and positive: the pinhole centre (entrance pupil) of a
     # long macro lens sits far behind the standoff sensors' reference plane.
-    lb = [fx0 * 0.1, -20, -300, -300, -300, -1.5, -1.5, -1.5]
-    ub = [fx0 * 20, 400, 300, 300, 300, 1.5, 1.5, 1.5]
-    p0 = np.zeros(8)
-    p0[0] = fx0
-    trials = []
-    for sign in (1.0, -1.0):
-        for psi in (-70, -35, 0, 35, 70):
-            for roll in (0, 90, 180, 270):
-                fn = resid_for(sign, base_rm(psi, roll))
+    parameter_lower_bounds = [initial_focal_length_px * 0.1, -20, -300, -300, -300, -1.5, -1.5, -1.5]
+    parameter_upper_bounds = [initial_focal_length_px * 20, 400, 300, 300, 300, 1.5, 1.5, 1.5]
+    initial_parameter_vector = np.zeros(8)
+    initial_parameter_vector[0] = initial_focal_length_px
+    fit_trials = []
+    for frame_rotation_sign in (1.0, -1.0):
+        for optical_axis_tilt_deg in (-70, -35, 0, 35, 70):
+            for camera_roll_deg in (0, 90, 180, 270):
+                residual_function = build_pair_reprojection_residual_function(frame_rotation_sign, build_initial_camera_mount_rotation(optical_axis_tilt_deg, camera_roll_deg))
                 try:
-                    sol = least_squares(
-                        fn,
-                        p0,
+                    fit_result = least_squares(
+                        residual_function,
+                        initial_parameter_vector,
                         method="trf",
                         loss="soft_l1",
                         f_scale=5.0,
                         max_nfev=25,
-                        bounds=(lb, ub),
+                        bounds=(parameter_lower_bounds, parameter_upper_bounds),
                     )
                 except Exception:
                     continue
-                trials.append((sol.cost, sol.x, sign, psi, roll))
-    trials.sort(key=lambda t: t[0])
+                fit_trials.append((fit_result.cost, fit_result.x, frame_rotation_sign, optical_axis_tilt_deg, camera_roll_deg))
+    fit_trials.sort(key=lambda fit_trial: fit_trial[0])
     best = None
-    for cost0, x0_, sign, psi, roll in trials[:3]:  # polish the 3 best seeds
-        fn = resid_for(sign, base_rm(psi, roll))
-        sol = least_squares(
-            fn, x0_, method="trf", loss="soft_l1", f_scale=5.0, max_nfev=150, bounds=(lb, ub)
+    for seed_cost, seed_parameters, frame_rotation_sign, optical_axis_tilt_deg, camera_roll_deg in fit_trials[:3]:  # polish the 3 best seeds
+        residual_function = build_pair_reprojection_residual_function(frame_rotation_sign, build_initial_camera_mount_rotation(optical_axis_tilt_deg, camera_roll_deg))
+        fit_result = least_squares(
+            residual_function, seed_parameters, method="trf", loss="soft_l1", f_scale=5.0, max_nfev=150, bounds=(parameter_lower_bounds, parameter_upper_bounds)
         )
-        if best is None or sol.cost < best[0]:
-            best = (sol.cost, sol, sign, base_rm(psi, roll), psi, roll)
-    cost, sol, sign, Rm_init, psi, roll = best
-    p = sol.x
-    Rm = Rm_init @ Rotation.from_rotvec(p[5:8]).as_matrix()
-    mdl = RigModel(
-        fx=p[0],
+        if best is None or fit_result.cost < best[0]:
+            best = (fit_result.cost, fit_result, frame_rotation_sign, build_initial_camera_mount_rotation(optical_axis_tilt_deg, camera_roll_deg), optical_axis_tilt_deg, camera_roll_deg)
+    fit_cost, fit_result, frame_rotation_sign, initial_mount_rotation, optical_axis_tilt_deg, camera_roll_deg = best
+    parameter_vector = fit_result.x
+    camera_mount_rotation = initial_mount_rotation @ Rotation.from_rotvec(parameter_vector[5:8]).as_matrix()
+    rig_model = RigModel(
+        fx=parameter_vector[0],
         k1=0.0,
         cx=cx,
         cy=cy,
-        sign=sign,
-        lever=p[2:5].copy(),
-        Rm=Rm,
-        dz0=p[1],
+        sign=frame_rotation_sign,
+        lever=parameter_vector[2:5].copy(),
+        Rm=camera_mount_rotation,
+        dz0=parameter_vector[1],
         downscale=downscale,
     )
     # robust-ish rms of the pixel part only
-    nres = meas.size
-    fn = resid_for(sign, Rm_init)
-    r = fn(p)[:nres] * 3.0
-    rms = float(np.sqrt(np.mean(r**2)))
+    pixel_residual_count = measured_image_positions.size
+    residual_function = build_pair_reprojection_residual_function(frame_rotation_sign, initial_mount_rotation)
+    pixel_reprojection_residuals = residual_function(parameter_vector)[:pixel_residual_count] * 3.0
+    rms = float(np.sqrt(np.mean(pixel_reprojection_residuals**2)))
     print(
-        f"      best init: sign={sign:+.0f} psi={psi} roll={roll}; "
-        f"fit rms {rms:.2f}px over {len(cpairs)} consecutive pairs"
+        f"      best init: frame_rotation_sign={frame_rotation_sign:+.0f} optical_axis_tilt_degrees={optical_axis_tilt_deg} camera_roll_degrees={camera_roll_deg}; "
+        f"fit rms {rms:.2f}px over {len(consecutive_pairs)} consecutive pairs"
     )
-    return mdl, rms
+    return rig_model, rms
 
 
 # ----------------------------------------------------------------------------
 # overlap prediction on the (curved) surface
 # ----------------------------------------------------------------------------
-def predict_frame_pair_translation(mdl, frames, R, C, i, j):
+def predict_frame_pair_translation(rig_model, frames, camera_rotations, camera_centers, index, neighbor_index):
     """Predicted image translation i->j (mean over sample pts) in ds px."""
-    w, h = mdl.cx * 2, mdl.cy * 2
-    samp = np.array([[mdl.cx, mdl.cy], [w * 0.3, h * 0.3], [w * 0.7, h * 0.7]])
-    Zi = mdl.depth(frames[i])
-    xu = undistort_image_points_to_normalized_camera(samp, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
-    xc = np.concatenate([xu * Zi, np.full((len(samp), 1), Zi)], 1)
-    Xw = xc @ R[i].T + C[i]
-    uv, _ = project_world_points_into_camera(Xw, R[j], C[j], mdl.fx, mdl.k1, mdl.cx, mdl.cy)
-    return (uv - samp).mean(0)
+    image_width, image_height = rig_model.cx * 2, rig_model.cy * 2
+    sample_image_points = np.array(
+        [
+            [rig_model.cx, rig_model.cy],
+            [image_width * 0.3, image_height * 0.3],
+            [image_width * 0.7, image_height * 0.7],
+        ]
+    )
+    camera_depth_mm = rig_model.depth(frames[index])
+    normalized_sample_points = undistort_image_points_to_normalized_camera(
+        sample_image_points, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy
+    )
+    camera_space_points = np.concatenate(
+        [normalized_sample_points * camera_depth_mm, np.full((len(sample_image_points), 1), camera_depth_mm)],
+        1,
+    )
+    world_sample_points = camera_space_points @ camera_rotations[index].T + camera_centers[index]
+    projected_image_points, camera_depths = project_world_points_into_camera(
+        world_sample_points,
+        camera_rotations[neighbor_index],
+        camera_centers[neighbor_index],
+        rig_model.fx,
+        rig_model.k1,
+        rig_model.cx,
+        rig_model.cy,
+    )
+    return (projected_image_points - sample_image_points).mean(0)
 
 
-def find_overlapping_frame_pairs(mdl, frames, R, C, overlap_frac, max_partners):
+def find_overlapping_frame_pairs(rig_model, frames, camera_rotations, camera_centers, overlap_frac, max_partners):
     """Predict pairwise overlap by projecting footprints onto the mean plane."""
-    n = len(frames)
-    w, h = mdl.cx * 2, mdl.cy * 2
-    corners_px = np.array([[0, 0], [w, 0], [w, h], [0, h]], float)
-    centers = np.zeros((n, 3))
-    quads = np.zeros((n, 4, 3))
-    for f in frames:
-        Z = mdl.depth(f)
-        xu = undistort_image_points_to_normalized_camera(corners_px, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
-        xc = np.concatenate([xu * Z, np.full((4, 1), Z)], 1)
-        quads[f.idx] = xc @ R[f.idx].T + C[f.idx]
-        centers[f.idx] = C[f.idx] + Z * R[f.idx][:, 2]
+    frame_count = len(frames)
+    image_width, image_height = rig_model.cx * 2, rig_model.cy * 2
+    image_corners = np.array(
+        [[0, 0], [image_width, 0], [image_width, image_height], [0, image_height]], float
+    )
+    centers = np.zeros((frame_count, 3))
+    quads = np.zeros((frame_count, 4, 3))
+    for frame in frames:
+        camera_depth_mm = rig_model.depth(frame)
+        normalized_corner_points = undistort_image_points_to_normalized_camera(
+            image_corners, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy
+        )
+        camera_space_corners = np.concatenate(
+            [normalized_corner_points * camera_depth_mm, np.full((4, 1), camera_depth_mm)], 1
+        )
+        quads[frame.idx] = camera_space_corners @ camera_rotations[frame.idx].T + camera_centers[frame.idx]
+        centers[frame.idx] = camera_centers[frame.idx] + camera_depth_mm * camera_rotations[frame.idx][:, 2]
     ctr = centers.mean(0)
-    _, _, Vt = np.linalg.svd(centers - ctr, full_matrices=False)
-    e1, e2 = Vt[0], Vt[1]
+    left_singular_vectors, singular_values, right_singular_vectors = np.linalg.svd(centers - ctr, full_matrices=False)
+    e1, e2 = right_singular_vectors[0], right_singular_vectors[1]
     q2 = np.stack([(quads - ctr) @ e1, (quads - ctr) @ e2], axis=-1)  # (n,4,2)
     lo = q2.min(1)
     hi = q2.max(1)
     area = (hi - lo).prod(1)
     overlaps = {}
-    for i in range(n):
-        ix = np.maximum(0.0, np.minimum(hi[i, 0], hi[:, 0]) - np.maximum(lo[i, 0], lo[:, 0]))
-        iy = np.maximum(0.0, np.minimum(hi[i, 1], hi[:, 1]) - np.maximum(lo[i, 1], lo[:, 1]))
-        frac = ix * iy / np.minimum(area[i], area)
-        for j in range(i + 1, n):
-            if frac[j] >= overlap_frac:
-                overlaps[(i, j)] = float(frac[j])
-    partners = {i: [] for i in range(n)}
-    for (i, j), fr in overlaps.items():
-        partners[i].append((fr, j))
-        partners[j].append((fr, i))
+    for index in range(frame_count):
+        ix = np.maximum(0.0, np.minimum(hi[index, 0], hi[:, 0]) - np.maximum(lo[index, 0], lo[:, 0]))
+        iy = np.maximum(0.0, np.minimum(hi[index, 1], hi[:, 1]) - np.maximum(lo[index, 1], lo[:, 1]))
+        frac = ix * iy / np.minimum(area[index], area)
+        for neighbor_index in range(index + 1, frame_count):
+            if frac[neighbor_index] >= overlap_frac:
+                overlaps[(index, neighbor_index)] = float(frac[neighbor_index])
+    partners = {index: [] for index in range(frame_count)}
+    for (index, neighbor_index), fr in overlaps.items():
+        partners[index].append((fr, neighbor_index))
+        partners[neighbor_index].append((fr, index))
     keep = set()
-    for k, lst in partners.items():
-        for fr, o in sorted(lst, reverse=True)[:max_partners]:
-            keep.add((min(k, o), max(k, o)))
+    for item_index, lst in partners.items():
+        for overlap_fraction, partner_index in sorted(lst, reverse=True)[:max_partners]:
+            keep.add((min(item_index, partner_index), max(item_index, partner_index)))
     return keep, overlaps
 
 
@@ -254,34 +282,37 @@ def find_overlapping_frame_pairs(mdl, frames, R, C, overlap_frac, max_partners):
 # ----------------------------------------------------------------------------
 def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
     t0 = time.time()
-    nkp = [len(f.kp) for f in frames]
+    nkp = [len(frame.kp) for frame in frames]
     off = np.concatenate([[0], np.cumsum(nkp)])
     parent = np.arange(off[-1], dtype=np.int64)
 
-    def find(a):
-        root = a
-        while parent[root] != root:
-            root = parent[root]
-        while parent[a] != root:
-            parent[a], a = root, parent[a]
-        return root
+    def find(parent_node_index):
+        root_node_index = parent_node_index
+        while parent[root_node_index] != root_node_index:
+            root_node_index = parent[root_node_index]
+        while parent[parent_node_index] != root_node_index:
+            parent[parent_node_index], parent_node_index = root_node_index, parent[parent_node_index]
+        return root_node_index
 
     rng = np.random.default_rng(0)
-    for p in pairs:
-        m = len(p.src_kp)
-        sel = rng.permutation(m)[:max_corr_per_pair]
-        for a, b in zip(p.src_kp[sel], p.dst_kp[sel]):
-            ra, rb = find(off[p.i] + a), find(off[p.j] + b)
-            if ra != rb:
-                parent[rb] = ra
+    for point in pairs:
+        correspondence_count = len(point.src_kp)
+        selected_correspondence_indices = rng.permutation(correspondence_count)[:max_corr_per_pair]
+        for source_keypoint_index, destination_keypoint_index in zip(
+            point.src_kp[selected_correspondence_indices], point.dst_kp[selected_correspondence_indices]
+        ):
+            source_root = find(off[point.i] + source_keypoint_index)
+            destination_root = find(off[point.j] + destination_keypoint_index)
+            if source_root != destination_root:
+                parent[destination_root] = source_root
 
     # collect components
     groups = {}
     used = set()
-    for p in pairs:
-        for arr, fi in ((p.src_kp, p.i), (p.dst_kp, p.j)):
-            for a in arr:
-                used.add(off[fi] + a)
+    for point in pairs:
+        for arr, fi in ((point.src_kp, point.i), (point.dst_kp, point.j)):
+            for first_value in arr:
+                used.add(off[fi] + first_value)
     for node in used:
         groups.setdefault(find(node), []).append(node)
 
@@ -292,7 +323,7 @@ def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
     for root, nodes in groups.items():
         if len(nodes) < 2:
             continue
-        frs = [int(fr_of[n]) for n in nodes]
+        frs = [int(fr_of[item_count]) for item_count in nodes]
         if len(set(frs)) != len(frs):  # same frame twice -> ambiguous
             n_dup += 1
             continue
@@ -319,71 +350,89 @@ def build_3d_feature_tracks(frames, pairs, max_corr_per_pair):
 # ----------------------------------------------------------------------------
 # bundle adjustment: alternating intersection / resection
 # ----------------------------------------------------------------------------
-def triangulate_3d_feature_tracks(obs_frame, obs_uv, obs_track, ntracks, R, C, mdl):
-    xu = undistort_image_points_to_normalized_camera(obs_uv, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+def triangulate_3d_feature_tracks(obs_frame, obs_uv, obs_track, ntracks, camera_rotations, camera_centers, rig_model):
+    xu = undistort_image_points_to_normalized_camera(obs_uv, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy)
     d_cam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
-    d_w = np.einsum("nij,nj->ni", R[obs_frame], d_cam)
+    d_w = np.einsum("nij,nj->ni", camera_rotations[obs_frame], d_cam)
     d_w /= np.linalg.norm(d_w, axis=1, keepdims=True)
-    M = np.eye(3)[None] - d_w[:, :, None] * d_w[:, None, :]
-    A = np.zeros((ntracks, 3, 3))
-    b = np.zeros((ntracks, 3))
-    np.add.at(A, obs_track, M)
-    np.add.at(b, obs_track, np.einsum("nij,nj->ni", M, C[obs_frame]))
-    A += np.eye(3)[None] * 1e-9
+    matrix = np.eye(3)[None] - d_w[:, :, None] * d_w[:, None, :]
+    triangulation_normal_matrices = np.zeros((ntracks, 3, 3))
+    triangulation_right_hand_sides = np.zeros((ntracks, 3))
+    np.add.at(triangulation_normal_matrices, obs_track, matrix)
+    np.add.at(
+        triangulation_right_hand_sides,
+        obs_track,
+        np.einsum("nij,nj->ni", matrix, camera_centers[obs_frame]),
+    )
+    triangulation_normal_matrices += np.eye(3)[None] * 1e-9
     # NumPy 2.x interprets a 2-D right-hand side as a stack of matrices,
     # which broadcasts ``(tracks, 3)`` into ``(tracks, tracks, 3)`` here.
     # Make the per-track vector dimension explicit across NumPy versions.
-    return np.linalg.solve(A, b[..., None])[..., 0]
+    return np.linalg.solve(triangulation_normal_matrices, triangulation_right_hand_sides[..., None])[..., 0]
 
 
-def compute_feature_track_reprojection_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl):
-    Xo = X[obs_track]
-    Co = C[obs_frame]
-    xc = np.einsum("ni,nij->nj", Xo - Co, R[obs_frame])
-    z = np.maximum(xc[:, 2], 1e-6)
-    xn = xc[:, :2] / z[:, None]
-    r2 = (xn**2).sum(1)
-    uv = mdl.fx * xn * (1 + mdl.k1 * r2)[:, None] + [mdl.cx, mdl.cy]
-    err = np.linalg.norm(uv - obs_uv, axis=1)
-    return err, xc[:, 2]
+def compute_feature_track_reprojection_errors(landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model):
+    observed_landmark_points = landmark_points[obs_track]
+    observed_camera_centers = camera_centers[obs_frame]
+    camera_space_points = np.einsum(
+        "ni,nij->nj", observed_landmark_points - observed_camera_centers, camera_rotations[obs_frame]
+    )
+    camera_depths = np.maximum(camera_space_points[:, 2], 1e-6)
+    normalized_image_points = camera_space_points[:, :2] / camera_depths[:, None]
+    normalized_radius_squared = (normalized_image_points**2).sum(1)
+    projected_image_points = (
+        rig_model.fx * normalized_image_points * (1 + rig_model.k1 * normalized_radius_squared)[:, None]
+        + [rig_model.cx, rig_model.cy]
+    )
+    pixel_reprojection_errors = np.linalg.norm(projected_image_points - obs_uv, axis=1)
+    return pixel_reprojection_errors, camera_space_points[:, 2]
 
 
 def refine_all_camera_poses_from_tracks(
-    frames, X, obs_frame, obs_uv, obs_track, R, C, R0, C0, mdl, sigma_px, sigma_t, sigma_r
+    frames, landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, R0, C0, rig_model, sigma_px, sigma_t, sigma_r
 ):
     order = np.argsort(obs_frame, kind="stable")
     of, ou, ot = obs_frame[order], obs_uv[order], obs_track[order]
     bounds = np.searchsorted(of, np.arange(len(frames) + 1))
     n_small = 0
-    for f in frames:
-        i = f.idx
-        s, e = bounds[i], bounds[i + 1]
-        if e - s < 20:
+    for frame in frames:
+        index = frame.idx
+        first_observation_index, observation_end_index = bounds[index], bounds[index + 1]
+        if observation_end_index - first_observation_index < 20:
             n_small += 1
             continue
-        Xi, uvi = X[ot[s:e]], ou[s:e]
+        frame_landmark_points = landmark_points[ot[first_observation_index:observation_end_index]]
+        observed_image_points = ou[first_observation_index:observation_end_index]
         # init delta from current pose relative to nominal anchor
         d0 = np.zeros(6)
-        d0[:3] = C[i] - C0[i]
-        d0[3:] = Rotation.from_matrix(R0[i].T @ R[i]).as_rotvec()
+        d0[:3] = camera_centers[index] - C0[index]
+        d0[3:] = Rotation.from_matrix(R0[index].T @ camera_rotations[index]).as_rotvec()
 
-        def resid(d):
-            Rcw = R0[i] @ Rotation.from_rotvec(d[3:]).as_matrix()
-            Cc = C0[i] + d[:3]
-            uv, _ = project_world_points_into_camera(Xi, Rcw, Cc, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
-            r = ((uv - uvi) / sigma_px).ravel()
-            return np.concatenate([r, d[:3] / sigma_t, d[3:] / sigma_r])
+        def residuals(pose_delta):
+            camera_to_world_rotation = R0[index] @ Rotation.from_rotvec(pose_delta[3:]).as_matrix()
+            camera_center = C0[index] + pose_delta[:3]
+            projected_image_points, camera_depths = project_world_points_into_camera(
+                frame_landmark_points,
+                camera_to_world_rotation,
+                camera_center,
+                rig_model.fx,
+                rig_model.k1,
+                rig_model.cx,
+                rig_model.cy,
+            )
+            pixel_residuals = ((projected_image_points - observed_image_points) / sigma_px).ravel()
+            return np.concatenate([pixel_residuals, pose_delta[:3] / sigma_t, pose_delta[3:] / sigma_r])
 
         # robust loss: early rounds still contain large-residual cross-row
         # obs that the pose must converge towards, not be dragged by
-        sol = least_squares(resid, d0, method="trf", loss="soft_l1", f_scale=4.0, max_nfev=40)
-        R[i] = R0[i] @ Rotation.from_rotvec(sol.x[3:]).as_matrix()
-        C[i] = C0[i] + sol.x[:3]
+        optimization_result = least_squares(residuals, d0, method="trf", loss="soft_l1", f_scale=4.0, max_nfev=40)
+        camera_rotations[index] = R0[index] @ Rotation.from_rotvec(optimization_result.x[3:]).as_matrix()
+        camera_centers[index] = C0[index] + optimization_result.x[:3]
     if n_small:
         print(f"        ({n_small} frames with <20 obs kept at prior pose)")
 
 
-def optimize_camera_intrinsics_from_tracks(X, obs_frame, obs_uv, obs_track, R, C, mdl, nsub=80000, fit_k1=False):
+def optimize_camera_intrinsics_from_tracks(landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model, nsub=80000, fit_k1=False):
     """Closed-form refit of fx (and optionally k1): uv-c = [xn, xn*r2]@[fx, fx*k1].
 
     k1 fitting is off by default: Canon applies lens corrections to JPGs, and
@@ -392,40 +441,52 @@ def optimize_camera_intrinsics_from_tracks(X, obs_frame, obs_uv, obs_track, R, C
     if len(obs_uv) < 2000:
         return
     rng = np.random.default_rng(1)
-    idx = rng.permutation(len(obs_uv))[:nsub]
-    Xo = X[obs_track[idx]]
-    Ro, Co_, uvo = R[obs_frame[idx]], C[obs_frame[idx]], obs_uv[idx]
-    xc = np.einsum("ni,nij->nj", Xo - Co_, Ro)
-    z = np.maximum(xc[:, 2], 1e-6)
-    xn = xc[:, :2] / z[:, None]
-    r2 = (xn**2).sum(1)
+    selected_observation_indices = rng.permutation(len(obs_uv))[:nsub]
+    observed_landmark_points = landmark_points[obs_track[selected_observation_indices]]
+    observed_camera_rotations = camera_rotations[obs_frame[selected_observation_indices]]
+    observed_camera_centers = camera_centers[obs_frame[selected_observation_indices]]
+    observed_image_points = obs_uv[selected_observation_indices]
+    camera_space_points = np.einsum(
+        "ni,nij->nj", observed_landmark_points - observed_camera_centers, observed_camera_rotations
+    )
+    camera_depths = np.maximum(camera_space_points[:, 2], 1e-6)
+    normalized_image_points = camera_space_points[:, :2] / camera_depths[:, None]
+    normalized_radius_squared = (normalized_image_points**2).sum(1)
     if fit_k1:
-        A = np.stack([xn.ravel(), (xn * r2[:, None]).ravel()], 1)
+        intrinsic_design_matrix = np.stack(
+            [normalized_image_points.ravel(), (normalized_image_points * normalized_radius_squared[:, None]).ravel()], 1
+        )
     else:
-        A = xn.ravel()[:, None]
-    b = (uvo - [mdl.cx, mdl.cy]).ravel()
-    for _ in range(3):  # MAD-robust outlier trimming
-        a, *_ = np.linalg.lstsq(A, b, rcond=None)
-        res = A @ a - b
-        med = np.median(res)
-        s = 1.4826 * np.median(np.abs(res - med)) + 1e-9
-        keep = np.abs(res - med) < 4.0 * s
-        if keep.all():
+        intrinsic_design_matrix = normalized_image_points.ravel()[:, None]
+    centered_image_coordinates = (observed_image_points - [rig_model.cx, rig_model.cy]).ravel()
+    for iteration_index in range(3):  # MAD-robust outlier trimming
+        intrinsic_coefficients, residual_sums, matrix_rank, singular_values = np.linalg.lstsq(
+            intrinsic_design_matrix, centered_image_coordinates, rcond=None
+        )
+        intrinsic_fit_residuals = intrinsic_design_matrix @ intrinsic_coefficients - centered_image_coordinates
+        residual_median = np.median(intrinsic_fit_residuals)
+        robust_residual_scale = 1.4826 * np.median(np.abs(intrinsic_fit_residuals - residual_median)) + 1e-9
+        inlier_observation_mask = np.abs(intrinsic_fit_residuals - residual_median) < 4.0 * robust_residual_scale
+        if inlier_observation_mask.all():
             break
-        A, b = A[keep], b[keep]
-    fx = float(a[0])
-    if fx > 100.0:  # sanity: never collapse
-        mdl.fx = fx
+        intrinsic_design_matrix = intrinsic_design_matrix[inlier_observation_mask]
+        centered_image_coordinates = centered_image_coordinates[inlier_observation_mask]
+    focal_length_px = float(intrinsic_coefficients[0])
+    if focal_length_px > 100.0:  # sanity: never collapse
+        rig_model.fx = focal_length_px
         if fit_k1:
-            mdl.k1 = float(np.clip(float(a[1]) / fx, -0.15, 0.15))
+            rig_model.k1 = float(np.clip(float(intrinsic_coefficients[1]) / focal_length_px, -0.15, 0.15))
 
 
-def _project_matrix_to_rotation(M):
-    U, _, Vt = np.linalg.svd(M)
-    return U @ np.diag([1, 1, np.linalg.det(U @ Vt)]) @ Vt
+def _project_matrix_to_rotation(matrix):
+    left_singular_vectors, singular_values, right_singular_vectors = np.linalg.svd(matrix)
+    rotation_correction = np.diag(
+        [1, 1, np.linalg.det(left_singular_vectors @ right_singular_vectors)]
+    )
+    return left_singular_vectors @ rotation_correction @ right_singular_vectors
 
 
-def refit_rig_model_from_camera_poses(frames, R, C, mdl):
+def refit_rig_model_from_camera_poses(frames, camera_rotations, camera_centers, rig_model):
     """Re-anchor the rig model on the current BA poses.
 
     The pre-fit (consecutive-pair affines only) carries systematic bias; once
@@ -434,33 +495,48 @@ def refit_rig_model_from_camera_poses(frames, R, C, mdl):
     are re-estimated from the optimised poses, so the proprioception prior
     stops fighting that bias:  C ~ T + Q (g + Rrx lever),  R ~ Q Rrx Rm.
     """
-    Rrx = np.stack([Rotation.from_rotvec([mdl.sign * f.rx, 0, 0]).as_matrix() for f in frames])
-    g = np.array([f.g for f in frames])
-    Q = np.eye(3)
-    T = np.zeros(3)
-    lever = mdl.lever.copy()
-    for _ in range(4):
-        # lever given Q, T (linear)
-        A = np.einsum("ij,njk->nik", Q, Rrx).reshape(-1, 3)
-        b = (C - T - g @ Q.T).ravel()
-        lever, *_ = np.linalg.lstsq(A, b, rcond=None)
-        # mount rotation given Q
-        M = np.einsum("nji,njk->ik", np.einsum("ij,njk->nik", Q, Rrx), R)
-        Rm = _project_matrix_to_rotation(M)
-        # base transform given lever (Kabsch on camera centres)
-        Cn = g + np.einsum("nij,j->ni", Rrx, lever)
-        mc, mn = C.mean(0), Cn.mean(0)
-        H = (Cn - mn).T @ (C - mc)
-        Q = _project_matrix_to_rotation(H.T)
-        T = mc - Q @ mn
-    mdl.lever = lever
-    mdl.Rm = Rm
-    mdl.base_R = Q
-    mdl.base_t = T
-    return mdl.poses(frames)
+    frame_x_rotations = np.stack(
+        [Rotation.from_rotvec([rig_model.sign * frame.rx, 0, 0]).as_matrix() for frame in frames]
+    )
+    gantry_positions = np.array([frame.g for frame in frames])
+    base_rotation = np.eye(3)
+    base_translation = np.zeros(3)
+    lever = rig_model.lever.copy()
+    for iteration_index in range(4):
+        # Solve the lever arm given the current base rotation and translation.
+        lever_design_matrix = np.eins("ij,njk->nik", base_rotation, frame_x_rotations).reshape(-1, 3)
+        lever_targets = (
+            camera_centers - base_translation - gantry_positions @ base_rotation.T
+        ).ravel()
+        lever, residual_sums, matrix_rank, singular_values = np.linalg.lstsq(
+            lever_design_matrix, lever_targets, rcond=None
+        )
+        # Solve the camera mount rotation given the current base rotation.
+        mount_rotation_matrix = np.einsum(
+            "nji,njk->ik",
+            np.einsum("ij,njk->nik", base_rotation, frame_x_rotations),
+            camera_rotations,
+        )
+        mount_rotation = _project_matrix_to_rotation(mount_rotation_matrix)
+        # Fit the base rotation and translation from camera centers (Kabsch).
+        predicted_gantry_centers = gantry_positions + np.einsum(
+            "nij,j->ni", frame_x_rotations, lever
+        )
+        mean_camera_center = camera_centers.mean(0)
+        mean_predicted_center = predicted_gantry_centers.mean(0)
+        center_covariance = (predicted_gantry_centers - mean_predicted_center).T @ (
+            camera_centers - mean_camera_center
+        )
+        base_rotation = _project_matrix_to_rotation(center_covariance.T)
+        base_translation = mean_camera_center - base_rotation @ mean_predicted_center
+    rig_model.lever = lever
+    rig_model.Rm = mount_rotation
+    rig_model.base_R = base_rotation
+    rig_model.base_t = base_translation
+    return rig_model.poses(frames)
 
 
-def classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs, sigma_t=1.5, sigma_r_deg=3.0):
+def classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs, sigma_t=1.5, sigma_r_deg=3.0):
     """Re-split each pose deviation along the view-preserving null direction.
 
     With an ~8deg FOV, a sideways camera slide t and a counter-rotation
@@ -473,27 +549,27 @@ def classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs, sigma_t=1.5, 
     """
     st2 = sigma_t**2
     sr2 = math.radians(sigma_r_deg) ** 2
-    for f in frames:
-        i = f.idx
-        Z = Zs[i]
-        k = Z * Z / st2 + 1.0 / sr2
-        dtc = R0[i].T @ (C[i] - C0[i])
-        rv = Rotation.from_matrix(R0[i].T @ R[i]).as_rotvec()
+    for frame in frames:
+        index = frame.idx
+        design_matrix = Zs[index]
+        item_index = design_matrix * design_matrix / st2 + 1.0 / sr2
+        dtc = R0[index].T @ (camera_centers[index] - C0[index])
+        rv = Rotation.from_matrix(R0[index].T @ camera_rotations[index]).as_rotvec()
         # valley pair (t_x, th_y): t_x' = t_x - Z s, th_y' = th_y + s
-        s = (Z * dtc[0] / st2 - rv[1] / sr2) / k
-        dtc[0] -= Z * s
-        rv[1] += s
+        score = (design_matrix * dtc[0] / st2 - rv[1] / sr2) / item_index
+        dtc[0] -= design_matrix * score
+        rv[1] += score
         # valley pair (t_y, th_x): t_y' = t_y + Z s, th_x' = th_x + s
-        s = -(Z * dtc[1] / st2 + rv[0] / sr2) / k
-        dtc[1] += Z * s
-        rv[0] += s
-        C[i] = C0[i] + R0[i] @ dtc
-        R[i] = R0[i] @ Rotation.from_rotvec(rv).as_matrix()
+        score = -(design_matrix * dtc[1] / st2 + rv[0] / sr2) / item_index
+        dtc[1] += design_matrix * score
+        rv[0] += score
+        camera_centers[index] = C0[index] + R0[index] @ dtc
+        camera_rotations[index] = R0[index] @ Rotation.from_rotvec(rv).as_matrix()
 
 
-def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args):
+def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, C0, args):
     obs_frame, obs_uv, obs_track, ntracks = build_3d_feature_tracks(frames, pairs, args.max_corr_per_pair)
-    R, C = R0.copy(), C0.copy()
+    camera_rotations, camera_centers = R0.copy(), C0.copy()
     if ntracks == 0:
         # no usable tracks (e.g. a sparse revisit group with zero intra-group
         # matches): the poses stay at the proprioception prior, which is what
@@ -507,14 +583,14 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, ar
             obs_uv=np.zeros((0, 2)),
             obs_track=np.zeros(0, np.int32),
             err=np.zeros(0),
-            R=R,
-            C=C,
+            R=camera_rotations,
+            C=camera_centers,
             rms=0.0,
             history=[],
         )
     R0, C0 = R0.copy(), C0.copy()
     sigma_r = math.radians(args.sigma_r)
-    Zs = np.array([mdl.depth(f) for f in frames])
+    Zs = np.array([rig_model.depth(frame) for frame in frames])
     good = np.ones(len(obs_uv), bool)
     # round 1 keeps everything finite (the pre-fit bias puts genuine cross-row
     # obs at 50-300px; pruning them early starves BA of exactly the
@@ -526,24 +602,24 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, ar
         if rnd == switch and getattr(args, "rig_from", None):
             print("        (rig re-anchor skipped: --rig-from)")
         elif rnd == switch:
-            Xs_ = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
-            _, zc_ = compute_feature_track_reprojection_errors(Xs_, obs_frame[good], obs_uv[good], obs_track[good], R, C, mdl)
-            so_ = np.array([frames[i].standoff for i in obs_frame[good]])
-            mdl.dz0 = float(np.clip(np.median(zc_ - so_), -20, 600))
-            R0, C0 = refit_rig_model_from_camera_poses(frames, R, C, mdl)
-            Zs = np.array([mdl.depth(f) for f in frames])
+            Xs_ = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
+            reprojection_errors, camera_depths = compute_feature_track_reprojection_errors(Xs_, obs_frame[good], obs_uv[good], obs_track[good], camera_rotations, camera_centers, rig_model)
+            so_ = np.array([frames[index].standoff for index in obs_frame[good]])
+            rig_model.dz0 = float(np.clip(np.median(camera_depths - so_), -20, 600))
+            R0, C0 = refit_rig_model_from_camera_poses(frames, camera_rotations, camera_centers, rig_model)
+            Zs = np.array([rig_model.depth(frame) for frame in frames])
             print(
                 f"        re-anchored rig model: lever="
-                f"({mdl.lever[0]:.1f},{mdl.lever[1]:.1f},{mdl.lever[2]:.1f})mm, "
-                f"dz0={mdl.dz0:+.1f}mm"
+                f"({rig_model.lever[0]:.1f},{rig_model.lever[1]:.1f},{rig_model.lever[2]:.1f})mm, "
+                f"dz0={rig_model.dz0:+.1f}mm"
             )
         # loose prior while the anchor still carries pre-fit bias
         st = args.sigma_t * (2.0 if rnd < switch else 1.0)
         sr = sigma_r * (2.0 if rnd < switch else 1.0)
-        X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+        landmark_points = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
         cnt = np.bincount(obs_track[good], minlength=ntracks)
         # reproject ALL obs so early aggressive prunes can be re-admitted
-        err, zc = compute_feature_track_reprojection_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl)
+        err, zc = compute_feature_track_reprojection_errors(landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model)
         err[cnt[obs_track] < 2] = np.inf
         rms_pre = float(np.sqrt(np.mean(np.minimum(err[good], 1e6) ** 2)))
         med_pre = float(np.median(err[good]))
@@ -572,76 +648,76 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, ar
         t_rs = time.time()
         refine_all_camera_poses_from_tracks(
             frames,
-            X,
+            landmark_points,
             obs_frame[good],
             obs_uv[good],
             obs_track[good],
-            R,
-            C,
+            camera_rotations,
+            camera_centers,
             R0,
             C0,
-            mdl,
+            rig_model,
             args.sigma_px,
             st,
             sr,
         )
         print(f"        resect {time.time() - t_rs:.0f}s")
         if rnd >= 1 and not args.fx_full:
-            X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+            landmark_points = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
             optimize_camera_intrinsics_from_tracks(
-                X, obs_frame[good], obs_uv[good], obs_track[good], R, C, mdl, fit_k1=args.fit_k1
+                landmark_points, obs_frame[good], obs_uv[good], obs_track[good], camera_rotations, camera_centers, rig_model, fit_k1=args.fit_k1
             )
             print(
-                f"        intrinsics: fx={mdl.fx:.1f}ds-px "
-                f"({mdl.fx * mdl.downscale:.0f} full-res px), k1={mdl.k1:+.4f}"
+                f"        intrinsics: fx={rig_model.fx:.1f}ds-px "
+                f"({rig_model.fx * rig_model.downscale:.0f} full-res px), k1={rig_model.k1:+.4f}"
             )
     # re-split the translation/rotation valley to physical values, then one
     # tight-prior polish pass and a second re-split
-    err, _ = compute_feature_track_reprojection_errors(
-        triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl),
+    err, camera_depths = compute_feature_track_reprojection_errors(
+        triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model),
         obs_frame[good],
         obs_uv[good],
         obs_track[good],
-        R,
-        C,
-        mdl,
+        camera_rotations,
+        camera_centers,
+        rig_model,
     )
     med0 = float(np.median(err))
-    classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs)
-    X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+    classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs)
+    landmark_points = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
     refine_all_camera_poses_from_tracks(
         frames,
-        X,
+        landmark_points,
         obs_frame[good],
         obs_uv[good],
         obs_track[good],
-        R,
-        C,
+        camera_rotations,
+        camera_centers,
         R0,
         C0,
-        mdl,
+        rig_model,
         args.sigma_px,
         1.5,
         math.radians(3.0),
     )
-    classify_frames_by_capture_direction(frames, R, C, R0, C0, Zs)
-    err, _ = compute_feature_track_reprojection_errors(
-        triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl),
+    classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs)
+    err, camera_depths = compute_feature_track_reprojection_errors(
+        triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model),
         obs_frame[good],
         obs_uv[good],
         obs_track[good],
-        R,
-        C,
-        mdl,
+        camera_rotations,
+        camera_centers,
+        rig_model,
     )
     print(
         f"      re-split soft valley (metric fix): median reproj "
         f"{med0:.2f} -> {float(np.median(err)):.2f}px"
     )
     # final
-    X = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, R, C, mdl)
+    landmark_points = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
     cnt = np.bincount(obs_track[good], minlength=ntracks)
-    err, zc = compute_feature_track_reprojection_errors(X, obs_frame, obs_uv, obs_track, R, C, mdl)
+    err, zc = compute_feature_track_reprojection_errors(landmark_points, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model)
     err[cnt[obs_track] < 2] = np.inf
     zlo, zhi = 0.4 * Zs[obs_frame], 2.5 * Zs[obs_frame]
     good = (err < max(3.0, 6.0 * float(np.median(err[good])))) & (zc > zlo) & (zc < zhi)
@@ -652,29 +728,29 @@ def bundle_adjust_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, ar
     remap = -np.ones(ntracks, np.int64)
     remap[keep_tracks] = np.arange(len(keep_tracks))
     obs_track = remap[obs_track].astype(np.int32)
-    X = X[keep_tracks]
+    landmark_points = landmark_points[keep_tracks]
     track_err = np.zeros(len(keep_tracks))
     np.maximum.at(track_err, obs_track, err)
     rms = float(np.sqrt(np.mean(err**2)))
     print(
-        f"      final: {len(X)} landmarks, {len(obs_uv)} obs, rms {rms:.2f}px "
+        f"      final: {len(landmark_points)} landmarks, {len(obs_uv)} obs, rms {rms:.2f}px "
         f"(median {np.median(err):.2f}px)"
     )
     return dict(
-        X=X,
+        X=landmark_points,
         track_err=track_err,
         obs_frame=obs_frame,
         obs_uv=obs_uv,
         obs_track=obs_track,
         err=err,
-        R=R,
-        C=C,
+        R=camera_rotations,
+        C=camera_centers,
         rms=rms,
         history=history,
     )
 
 
-def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0, C0, args, group_of):
+def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, rig_model, R0, C0, args, group_of):
     """Breathing-robust registration. The skin deforms between scan passes, so a
     single rigid bundle can't explain frames captured minutes apart -- it puts
     cross-pass features at compromise 3D positions, which then ghost in the
@@ -687,17 +763,17 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0
 
     group_of: dict frame.idx -> group id. Returns the bundle_adjust_camera_poses_and_feature_tracks dict shape."""
     gids = sorted(set(group_of.values()))
-    intra = {g: [] for g in gids}
+    intra = {gauge: [] for gauge in gids}
     cross = []
-    for p in pairs:
-        ga, gb = group_of[p.i], group_of[p.j]
+    for point in pairs:
+        ga, gb = group_of[point.i], group_of[point.j]
         if ga == gb:
-            intra[ga].append(p)
+            intra[ga].append(point)
         else:
-            cross.append(p)
+            cross.append(point)
 
-    R = R0.copy()
-    C = C0.copy()
+    camera_rotations = R0.copy()
+    camera_centers = C0.copy()
     Xparts, ofr, ouv, otr, terr = [], [], [], [], []
     pt2track = {}  # (frame, x_round, y_round) -> global track
     grp_of_track = []  # group id per global track
@@ -706,73 +782,73 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0
     def key(fi, pt):
         return (int(fi), round(float(pt[0]), 2), round(float(pt[1]), 2))
 
-    for g in gids:
-        ng = sum(1 for i in group_of if group_of[i] == g)
-        print(f"      -- group {g}: {ng} frames, {len(intra[g])} intra-pairs")
-        ba = bundle_adjust_camera_poses_and_feature_tracks(frames, intra[g], mdl, R0, C0, args)
-        for i in group_of:
-            if group_of[i] == g:
-                R[i] = ba["R"][i]
-                C[i] = ba["C"][i]
-        tt = ba["obs_track"].astype(np.int64) + tbase
-        for fi, pt, t in zip(ba["obs_frame"], ba["obs_uv"], tt):
-            pt2track[key(fi, pt)] = int(t)
-        Xparts.append(ba["X"])
-        ofr.append(ba["obs_frame"])
-        ouv.append(ba["obs_uv"])
+    for gauge in gids:
+        ng = sum(1 for index in group_of if group_of[index] == gauge)
+        print(f"      -- group {gauge}: {ng} frames, {len(intra[gauge])} intra-pairs")
+        bundle_adjustment_result = bundle_adjust_camera_poses_and_feature_tracks(frames, intra[gauge], rig_model, R0, C0, args)
+        for index in group_of:
+            if group_of[index] == gauge:
+                camera_rotations[index] = bundle_adjustment_result["R"][index]
+                camera_centers[index] = bundle_adjustment_result["C"][index]
+        tt = bundle_adjustment_result["obs_track"].astype(np.int64) + tbase
+        for fi, pt, threshold in zip(bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], tt):
+            pt2track[key(fi, pt)] = int(threshold)
+        Xparts.append(bundle_adjustment_result["X"])
+        ofr.append(bundle_adjustment_result["obs_frame"])
+        ouv.append(bundle_adjustment_result["obs_uv"])
         otr.append(tt)
-        terr.append(ba["track_err"])
-        grp_of_track.extend([g] * len(ba["X"]))
-        tbase += len(ba["X"])
+        terr.append(bundle_adjustment_result["track_err"])
+        grp_of_track.extend([gauge] * len(bundle_adjustment_result["X"]))
+        tbase += len(bundle_adjustment_result["X"])
 
     Xg = np.concatenate(Xparts) if Xparts else np.zeros((0, 3))
     grp_of_track = np.array(grp_of_track)
 
     # cross-group landmark correspondences (dedup by track pair)
     corr = {}
-    for p in cross:
-        for a, b in zip(p.src_kp, p.dst_kp):
-            ta = pt2track.get(key(p.i, frames[p.i].kp[a].pt))
-            tb = pt2track.get(key(p.j, frames[p.j].kp[b].pt))
+    for point in cross:
+        for first_value, second_value in zip(point.src_kp, point.dst_kp):
+            ta = pt2track.get(key(point.i, frames[point.i].kp[first_value].pt))
+            tb = pt2track.get(key(point.j, frames[point.j].kp[second_value].pt))
             if ta is not None and tb is not None and grp_of_track[ta] != grp_of_track[tb]:
                 corr[(ta, tb)] = True
 
-    gidx = {g: k for k, g in enumerate(gids)}
+    gidx = {gauge: item_index for item_index, gauge in enumerate(gids)}
     t_solved = np.zeros((len(gids), 3))
     if args.group_align != "none" and corr:
         # per-group translation t_g minimising  sum |(Xa+t_a)-(Xb+t_b)|^2
         #                                        + lam sum |t_g|^2  (proprioception anchor / gauge)
-        M = np.zeros((len(gids), len(gids)))
+        matrix = np.zeros((len(gids), len(gids)))
         rhs = np.zeros((len(gids), 3))
         for ta, tb in corr:
             ga, gb = gidx[grp_of_track[ta]], gidx[grp_of_track[tb]]
-            d = Xg[ta] - Xg[tb]
-            M[ga, ga] += 1
-            M[gb, gb] += 1
-            M[ga, gb] -= 1
-            M[gb, ga] -= 1
-            rhs[ga] -= d
-            rhs[gb] += d
+            distance = Xg[ta] - Xg[tb]
+            matrix[ga, ga] += 1
+            matrix[gb, gb] += 1
+            matrix[ga, gb] -= 1
+            matrix[gb, ga] -= 1
+            rhs[ga] -= distance
+            rhs[gb] += distance
         lam = 1.0
-        t_solved = np.linalg.solve(M + lam * np.eye(len(gids)), rhs)
+        t_solved = np.linalg.solve(matrix + lam * np.eye(len(gids)), rhs)
         # The dot ghosting is an IN-PLANE displacement (a feature's ortho-texture
         # position depends on its x,y, not its depth). The along-optical-axis
         # component, by contrast, is the fx/depth-degenerate direction where each
         # small group floats unreliably -- fitting it drags weakly-constrained end
         # rows many mm. So keep only the tangential correction and leave depth to
         # proprioception (which the per-group BA already pins via the standoff).
-        nhat = np.array([R[i][:, 2] for i in group_of]).mean(0)
+        nhat = np.array([camera_rotations[index][:, 2] for index in group_of]).mean(0)
         nhat /= np.linalg.norm(nhat)
         t_solved -= (t_solved @ nhat)[:, None] * nhat
-        for g in gids:
-            for i in group_of:
-                if group_of[i] == g:
-                    C[i] = C[i] + t_solved[gidx[g]]
-            Xg[grp_of_track == g] += t_solved[gidx[g]]
+        for gauge in gids:
+            for index in group_of:
+                if group_of[index] == gauge:
+                    camera_centers[index] = camera_centers[index] + t_solved[gidx[gauge]]
+            Xg[grp_of_track == gauge] += t_solved[gidx[gauge]]
         mags = np.linalg.norm(t_solved, axis=1)
         print(
             f"      group alignment ({len(corr)} cross-corr): "
-            f"|t| per group " + " ".join(f"{g}:{mags[gidx[g]]:.1f}" for g in gids) + " mm"
+            f"|t| per group " + " ".join(f"{gauge}:{mags[gidx[gauge]]:.1f}" for gauge in gids) + " mm"
         )
     elif args.group_align != "none":
         print("      ! no cross-group correspondences -- groups left at proprioception")
@@ -781,7 +857,7 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0
     obs_uv = np.concatenate(ouv)
     obs_track = np.concatenate(otr).astype(np.int32)
     track_err = np.concatenate(terr)
-    err, _ = compute_feature_track_reprojection_errors(Xg, obs_frame, obs_uv, obs_track, R, C, mdl)
+    err, camera_depths = compute_feature_track_reprojection_errors(Xg, obs_frame, obs_uv, obs_track, camera_rotations, camera_centers, rig_model)
     rms = float(np.sqrt(np.mean(err**2)))
     print(
         f"      grouped final: {len(gids)} groups, {len(Xg)} landmarks, "
@@ -794,8 +870,8 @@ def bundle_adjust_grouped_camera_poses_and_feature_tracks(frames, pairs, mdl, R0
         obs_uv=obs_uv,
         obs_track=obs_track,
         err=err,
-        R=R,
-        C=C,
+        R=camera_rotations,
+        C=camera_centers,
         rms=rms,
         history=[],
     )

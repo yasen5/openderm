@@ -22,106 +22,152 @@ class Surface:
         # extrapolated). Texturing is restricted to this region.
         self.support = support if support is not None else np.ones_like(zgrid, bool)
 
-    def _interp(self, grid, x, y):
-        xi = np.clip((x - self.xs[0]) / (self.xs[1] - self.xs[0]), 0, len(self.xs) - 1.001)
-        yi = np.clip((y - self.ys[0]) / (self.ys[1] - self.ys[0]), 0, len(self.ys) - 1.001)
+    def _interp(self, grid, surface_x, surface_y):
+        xi = np.clip((surface_x - self.xs[0]) / (self.xs[1] - self.xs[0]), 0, len(self.xs) - 1.001)
+        yi = np.clip((surface_y - self.ys[0]) / (self.ys[1] - self.ys[0]), 0, len(self.ys) - 1.001)
         x0 = np.floor(xi).astype(int)
         y0 = np.floor(yi).astype(int)
         fx_ = xi - x0
         fy_ = yi - y0
-        g = grid
-        return (g[y0, x0] * (1 - fx_) + g[y0, x0 + 1] * fx_) * (1 - fy_) + (
-            g[y0 + 1, x0] * (1 - fx_) + g[y0 + 1, x0 + 1] * fx_
+        gauge = grid
+        return (gauge[y0, x0] * (1 - fx_) + gauge[y0, x0 + 1] * fx_) * (1 - fy_) + (
+            gauge[y0 + 1, x0] * (1 - fx_) + gauge[y0 + 1, x0 + 1] * fx_
         ) * fy_
 
-    def height(self, x, y):
-        return self._interp(self.z, x, y)
+    def height(self, surface_x, surface_y):
+        return self._interp(self.z, surface_x, surface_y)
 
-    def grad(self, x, y):
-        return self._interp(self.gx, x, y), self._interp(self.gy, x, y)
+    def grad(self, surface_x, surface_y):
+        return self._interp(self.gx, surface_x, surface_y), self._interp(self.gy, surface_x, surface_y)
 
-    def normal(self, x, y, up_sign=1.0):
-        gx, gy = self.grad(x, y)
-        n = np.stack([-gx, -gy, np.ones_like(gx)], axis=-1) * up_sign
-        return n / np.linalg.norm(n, axis=-1, keepdims=True)
+    def normal(self, surface_x, surface_y, up_sign=1.0):
+        gx, gy = self.grad(surface_x, surface_y)
+        item_count = np.stack([-gx, -gy, np.ones_like(gx)], axis=-1) * up_sign
+        return item_count / np.linalg.norm(item_count, axis=-1, keepdims=True)
 
-    def supported(self, x, y):
+    def supported(self, surface_x, surface_y):
         xi = np.clip(
-            np.round((x - self.xs[0]) / (self.xs[1] - self.xs[0])).astype(int), 0, len(self.xs) - 1
+            np.round((surface_x - self.xs[0]) / (self.xs[1] - self.xs[0])).astype(int), 0, len(self.xs) - 1
         )
         yi = np.clip(
-            np.round((y - self.ys[0]) / (self.ys[1] - self.ys[0])).astype(int), 0, len(self.ys) - 1
+            np.round((surface_y - self.ys[0]) / (self.ys[1] - self.ys[0])).astype(int), 0, len(self.ys) - 1
         )
         return self.support[yi, xi]
 
 
-def fit_surface_heightfield(X, bounds, pitch, smooth, robust_iters=3, w0=None):
-    x0, x1, y0, y1 = bounds
-    xs = np.arange(x0, x1 + pitch, pitch)
-    ys = np.arange(y0, y1 + pitch, pitch)
-    nx, ny = len(xs), len(ys)
-    N = nx * ny
+def fit_surface_heightfield(
+    landmark_points,
+    surface_bounds=None,
+    grid_pitch_mm=None,
+    smoothness_weight=None,
+    robust_fit_iteration_count=3,
+    initial_landmark_weights=None,
+    **legacy_options,
+):
+    surface_bounds = legacy_options.pop("bounds", surface_bounds)
+    grid_pitch_mm = legacy_options.pop("pitch", grid_pitch_mm)
+    smoothness_weight = legacy_options.pop("smooth", smoothness_weight)
+    robust_fit_iteration_count = legacy_options.pop("robust_iters", robust_fit_iteration_count)
+    initial_landmark_weights = legacy_options.pop("w0", initial_landmark_weights)
+    if legacy_options:
+        unexpected_option = next(iter(legacy_options))
+        raise TypeError(f"fit_surface_heightfield got an unexpected keyword argument {unexpected_option!r}")
+    if surface_bounds is None or grid_pitch_mm is None or smoothness_weight is None:
+        raise TypeError("fit_surface_heightfield requires bounds, pitch, and smoothness values")
+    surface_x_min, surface_x_max, surface_y_min, surface_y_max = surface_bounds
+    surface_x_grid = np.arange(surface_x_min, surface_x_max + grid_pitch_mm, grid_pitch_mm)
+    surface_y_grid = np.arange(surface_y_min, surface_y_max + grid_pitch_mm, grid_pitch_mm)
+    surface_x_node_count, surface_y_node_count = len(surface_x_grid), len(surface_y_grid)
+    surface_grid_node_count = surface_x_node_count * surface_y_node_count
 
-    px = np.clip((X[:, 0] - x0) / pitch, 0, nx - 1.001)
-    py = np.clip((X[:, 1] - y0) / pitch, 0, ny - 1.001)
-    ix = np.floor(px).astype(int)
-    iy = np.floor(py).astype(int)
-    fx_ = px - ix
-    fy_ = py - iy
-    rows = np.repeat(np.arange(len(X)), 4)
-    cols = np.stack(
-        [iy * nx + ix, iy * nx + ix + 1, (iy + 1) * nx + ix, (iy + 1) * nx + ix + 1], 1
+    landmark_grid_x_positions = np.clip((landmark_points[:, 0] - surface_x_min) / grid_pitch_mm, 0, surface_x_node_count - 1.001)
+    landmark_grid_y_positions = np.clip((landmark_points[:, 1] - surface_y_min) / grid_pitch_mm, 0, surface_y_node_count - 1.001)
+    landmark_grid_x_indices = np.floor(landmark_grid_x_positions).astype(int)
+    landmark_grid_y_indices = np.floor(landmark_grid_y_positions).astype(int)
+    fractional_grid_x = landmark_grid_x_positions - landmark_grid_x_indices
+    fractional_grid_y = landmark_grid_y_positions - landmark_grid_y_indices
+    interpolation_row_indices = np.repeat(np.arange(len(landmark_points)), 4)
+    interpolation_column_indices = np.stack(
+        [landmark_grid_y_indices * surface_x_node_count + landmark_grid_x_indices, landmark_grid_y_indices * surface_x_node_count + landmark_grid_x_indices + 1, (landmark_grid_y_indices + 1) * surface_x_node_count + landmark_grid_x_indices, (landmark_grid_y_indices + 1) * surface_x_node_count + landmark_grid_x_indices + 1], 1
     ).ravel()
-    vals = np.stack([(1 - fx_) * (1 - fy_), fx_ * (1 - fy_), (1 - fx_) * fy_, fx_ * fy_], 1).ravel()
-    A = sp.coo_matrix((vals, (rows, cols)), shape=(len(X), N)).tocsr()
+    interpolation_weights = np.stack(
+        [
+            (1 - fractional_grid_x) * (1 - fractional_grid_y),
+            fractional_grid_x * (1 - fractional_grid_y),
+            (1 - fractional_grid_x) * fractional_grid_y,
+            fractional_grid_x * fractional_grid_y,
+        ],
+        1,
+    ).ravel()
+    landmark_interpolation_matrix = sp.coo_matrix(
+        (interpolation_weights, (interpolation_row_indices, interpolation_column_indices)), shape=(len(landmark_points), surface_grid_node_count)
+    ).tocsr()
 
     # second-difference smoothness in x and y
     def second_diff(n_outer, n_inner, stride_outer, stride_inner):
-        r, c, v = [], [], []
-        k = 0
-        for o in range(n_outer):
-            for i in range(1, n_inner - 1):
-                base = o * stride_outer + i * stride_inner
-                r += [k, k, k]
-                c += [base - stride_inner, base, base + stride_inner]
-                v += [1.0, -2.0, 1.0]
-                k += 1
-        return sp.coo_matrix((v, (r, c)), shape=(k, N)).tocsr()
+        row_indices, column_indices, second_difference_values = [], [], []
+        constraint_index = 0
+        for outer_index in range(n_outer):
+            for inner_index in range(1, n_inner - 1):
+                surface_grid_node_index = outer_index * stride_outer + inner_index * stride_inner
+                row_indices.extend([constraint_index] * 3)
+                column_indices.extend(
+                    [surface_grid_node_index - stride_inner, surface_grid_node_index, surface_grid_node_index + stride_inner]
+                )
+                second_difference_values.extend([1.0, -2.0, 1.0])
+                constraint_index += 1
+        return sp.coo_matrix(
+            (second_difference_values, (row_indices, column_indices)),
+            shape=(constraint_index, surface_grid_node_count),
+        ).tocsr()
 
-    Sx = second_diff(ny, nx, nx, 1)
-    Sy = second_diff(nx, ny, 1, nx)
-    S = sp.vstack([Sx, Sy]) * smooth
-    reg = (S.T @ S + sp.eye(N) * 1e-6).tocsc()
+    surface_x_second_difference_matrix = second_diff(surface_y_node_count, surface_x_node_count, surface_x_node_count, 1)
+    surface_y_second_difference_matrix = second_diff(surface_x_node_count, surface_y_node_count, 1, surface_x_node_count)
+    smoothness_matrix = sp.vstack([surface_x_second_difference_matrix, surface_y_second_difference_matrix]) * smoothness_weight
+    regularization_matrix = (smoothness_matrix.T @ smoothness_matrix + sp.eye(surface_grid_node_count) * 1e-6).tocsc()
 
     # base weight: landmarks seen from more views triangulate far more
     # accurately in depth (narrow FOV -> depth noise ~ Z^2/(fx*baseline))
-    wb = np.ones(len(X)) if w0 is None else np.asarray(w0, float)
-    w = wb.copy()
-    z = X[:, 2]
-    sol = None
-    for it in range(robust_iters):
-        W = sp.diags(w)
-        lhs = (A.T @ W @ A + reg).tocsc()
-        rhs = A.T @ (w * z)
-        sol = spla.spsolve(lhs, rhs)
-        r = A @ sol - z
-        sigma = 1.4826 * np.median(np.abs(r - np.median(r))) + 1e-9
-        w = wb * np.where(np.abs(r) < 2.0 * sigma, 1.0, 2.0 * sigma / np.abs(r))
-        w[np.abs(r) > 6 * sigma] = 0.0
-    r = A @ sol - z
-    inl = np.abs(r) < 6 * (1.4826 * np.median(np.abs(r - np.median(r))) + 1e-9)
-    rmsr = float(np.sqrt(np.mean(r[inl] ** 2)))
+    base_landmark_weights = np.ones(len(landmark_points)) if initial_landmark_weights is None else np.asarray(initial_landmark_weights, float)
+    robust_weights = base_landmark_weights.copy()
+    landmark_heights = landmark_points[:, 2]
+    surface_heights = None
+    for robust_fit_iteration in range(robust_fit_iteration_count):
+        observation_weight_matrix = sp.diags(robust_weights)
+        normal_matrix = (
+            landmark_interpolation_matrix.T
+            @ observation_weight_matrix
+            @ landmark_interpolation_matrix
+            + regularization_matrix
+        ).tocsc()
+        normal_rhs = landmark_interpolation_matrix.T @ (robust_weights * landmark_heights)
+        surface_heights = spla.spsolve(normal_matrix, normal_rhs)
+        landmark_height_residuals = landmark_interpolation_matrix @ surface_heights - landmark_heights
+        sigma = 1.4826 * np.median(
+            np.abs(landmark_height_residuals - np.median(landmark_height_residuals))
+        ) + 1e-9
+        robust_weights = base_landmark_weights * np.where(
+            np.abs(landmark_height_residuals) < 2.0 * sigma,
+            1.0,
+            2.0 * sigma / np.abs(landmark_height_residuals),
+        )
+        robust_weights[np.abs(landmark_height_residuals) > 6 * sigma] = 0.0
+    landmark_height_residuals = landmark_interpolation_matrix @ surface_heights - landmark_heights
+    inlier_mask = np.abs(landmark_height_residuals) < 6 * (
+        1.4826 * np.median(np.abs(landmark_height_residuals - np.median(landmark_height_residuals))) + 1e-9
+    )
+    surface_fit_rms = float(np.sqrt(np.mean(landmark_height_residuals[inlier_mask] ** 2)))
     print(
-        f"      surface grid {nx}x{ny} @ {pitch}mm, landmark->surface rms "
-        f"{rmsr:.3f}mm ({(~inl).sum()} outliers)"
+        f"      surface grid {surface_x_node_count}x{surface_y_node_count} @ {grid_pitch_mm}mm, landmark->surface rms "
+        f"{surface_fit_rms:.3f}mm ({(~inlier_mask).sum()} outliers)"
     )
     # support mask: nodes touched by an inlier landmark, dilated ~6mm
     from scipy.ndimage import binary_dilation
 
-    touched = np.zeros(N, bool)
-    touched[cols.reshape(-1, 4)[inl].ravel()] = True
-    sup = binary_dilation(touched.reshape(ny, nx), iterations=max(1, int(round(6.0 / pitch))))
-    return Surface(xs, ys, sol.reshape(ny, nx), support=sup), rmsr
+    touched = np.zeros(surface_grid_node_count, bool)
+    touched[interpolation_column_indices.reshape(-1, 4)[inlier_mask].ravel()] = True
+    surface_support_mask = binary_dilation(touched.reshape(surface_y_node_count, surface_x_node_count), iterations=max(1, int(round(6.0 / grid_pitch_mm))))
+    return Surface(surface_x_grid, surface_y_grid, surface_heights.reshape(surface_y_node_count, surface_x_node_count), support=surface_support_mask), surface_fit_rms
 
 
 # ----------------------------------------------------------------------------
@@ -146,73 +192,73 @@ class TexParam:
         # mean gz(gy) profile over supported cells, binned in gantry y
         gyf, gzf = gy[sup], gz[sup]
         pitch = abs(surf.ys[1] - surf.ys[0])
-        n = max(8, int(np.ptp(gyf) / pitch)) if len(gyf) else 8
-        edges = np.linspace(gyf.min(), gyf.max(), n + 1) if len(gyf) else np.linspace(0, 1, n + 1)
+        item_count = max(8, int(np.ptp(gyf) / pitch)) if len(gyf) else 8
+        edges = np.linspace(gyf.min(), gyf.max(), item_count + 1) if len(gyf) else np.linspace(0, 1, item_count + 1)
         ctr = 0.5 * (edges[:-1] + edges[1:])
-        idx = np.clip(np.digitize(gyf, edges) - 1, 0, n - 1)
-        prof = np.array([gzf[idx == k].mean() if np.any(idx == k) else np.nan for k in range(n)])
+        idx = np.clip(np.digitize(gyf, edges) - 1, 0, item_count - 1)
+        prof = np.array([gzf[idx == item_index].mean() if np.any(idx == item_index) else np.nan for item_index in range(item_count)])
         ok = ~np.isnan(prof)
-        prof = np.interp(ctr, ctr[ok], prof[ok]) if ok.any() else np.zeros(n)
-        dy = ctr[1] - ctr[0] if n > 1 else 1.0
+        prof = np.interp(ctr, ctr[ok], prof[ok]) if ok.any() else np.zeros(item_count)
+        dy = ctr[1] - ctr[0] if item_count > 1 else 1.0
         ds = np.sqrt(1.0 + np.gradient(prof, dy) ** 2)
         self.gy = ctr
         self.s = np.concatenate([[0], np.cumsum((ds[1:] + ds[:-1]) * 0.5 * dy)])
 
-    def to_uv(self, x, y):
-        z = self.surf.height(x, y)
-        Pg = (np.stack([x, y, z], -1) - self.bt) @ self.bR
+    def to_uv(self, surface_x, surface_y):
+        world_z = self.surf.height(surface_x, surface_y)
+        Pg = (np.stack([surface_x, surface_y, world_z], -1) - self.bt) @ self.bR
         return Pg[..., 0], np.interp(Pg[..., 1], self.gy, self.s)
 
-    def to_xy(self, u, v):
-        gy = np.interp(v, self.s, self.gy)
+    def to_xy(self, texture_u, texture_v):
+        gy = np.interp(texture_v, self.s, self.gy)
         # invert the (near-identity) world<->gantry map by Newton: find world
         # (x,y) whose surface point transforms to gantry (u, gy)
-        x = np.array(u, float)
-        y = np.array(gy, float)
-        for _ in range(6):
-            Pg = (np.stack([x, y, self.surf.height(x, y)], -1) - self.bt) @ self.bR
-            x = x - (Pg[..., 0] - u)
-            y = y - (Pg[..., 1] - gy)
-        return x, y
+        surface_x = np.array(texture_u, float)
+        surface_y = np.array(gy, float)
+        for iteration_index in range(6):
+            Pg = (np.stack([surface_x, surface_y, self.surf.height(surface_x, surface_y)], -1) - self.bt) @ self.bR
+            surface_x = surface_x - (Pg[..., 0] - texture_u)
+            surface_y = surface_y - (Pg[..., 1] - gy)
+        return surface_x, surface_y
 
 
 def ray_surface_intersect(Cw, dirs, surf: Surface, t0, iters=8):
     """Intersect rays (origin Cw, unit dirs (N,3)) with the heightfield."""
-    t = np.full(len(dirs), float(t0))
-    for _ in range(iters):
-        P = Cw + dirs * t[:, None]
-        gx, gy = surf.grad(P[:, 0], P[:, 1])
-        fz = surf.height(P[:, 0], P[:, 1])
-        r = P[:, 2] - fz
+    threshold = np.full(len(dirs), float(t0))
+    for iteration_index in range(iters):
+        points = Cw + dirs * threshold[:, None]
+        gx, gy = surf.grad(points[:, 0], points[:, 1])
+        fz = surf.height(points[:, 0], points[:, 1])
+        camera_rotation = points[:, 2] - fz
         denom = dirs[:, 2] - (gx * dirs[:, 0] + gy * dirs[:, 1])
         denom = np.where(np.abs(denom) < 1e-6, np.sign(denom + 1e-12) * 1e-6, denom)
-        t = t - r / denom
-        t = np.clip(t, 1.0, 4.0 * t0)
-    return Cw + dirs * t[:, None]
+        threshold = threshold - camera_rotation / denom
+        threshold = np.clip(threshold, 1.0, 4.0 * t0)
+    return Cw + dirs * threshold[:, None]
 
 
-def compute_camera_frame_surface_footprint(f, R, C, mdl, surf, n_edge=6):
+def compute_camera_frame_surface_footprint(frame, camera_rotations, camera_centers, rig_model, surf, n_edge=6):
     """Footprint polygon on the surface (world pts), sampled along edges."""
-    w, h = mdl.cx * 2, mdl.cy * 2
+    weight, image_height = rig_model.cx * 2, rig_model.cy * 2
     ts = np.linspace(0, 1, n_edge, endpoint=False)
     edges = []
-    cpx = [(0, 0), (w, 0), (w, h), (0, h)]
-    for a, b in zip(cpx, cpx[1:] + cpx[:1]):
-        for t in ts:
-            edges.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
+    cpx = [(0, 0), (weight, 0), (weight, image_height), (0, image_height)]
+    for first_value, second_value in zip(cpx, cpx[1:] + cpx[:1]):
+        for threshold in ts:
+            edges.append((first_value[0] + (second_value[0] - first_value[0]) * threshold, first_value[1] + (second_value[1] - first_value[1]) * threshold))
     edges = np.array(edges)
-    xu = undistort_image_points_to_normalized_camera(edges, mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+    xu = undistort_image_points_to_normalized_camera(edges, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy)
     d_cam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
-    d_w = d_cam @ R[f.idx].T
+    d_w = d_cam @ camera_rotations[frame.idx].T
     d_w /= np.linalg.norm(d_w, axis=1, keepdims=True)
-    return ray_surface_intersect(C[f.idx], d_w, surf, mdl.depth(f))
+    return ray_surface_intersect(camera_centers[frame.idx], d_w, surf, rig_model.depth(frame))
 
 
 # ----------------------------------------------------------------------------
 # deformable alignment (breathing): smooth per-frame warp in the unwrapped map
 # ----------------------------------------------------------------------------
 def align_frames_with_deformable_surface_warps(
-    frames, pairs, R, C, mdl, surf, tp, reg=2.0, max_per_pair=200, order=1
+    frames, pairs, camera_rotations, camera_centers, rig_model, surf, texture_parameters, reg=2.0, max_per_pair=200, order=1
 ):
     """Remove the residual breathing misalignment that makes stitch seams cross
     moles. Each overlapping pair gives feature correspondences that the rigid
@@ -227,74 +273,74 @@ def align_frames_with_deformable_surface_warps(
     import scipy.sparse as sp
     import scipy.sparse.linalg as spla
 
-    n = len(frames)
+    item_count = len(frames)
 
     def to_uv(pts, fi):
-        xu = undistort_image_points_to_normalized_camera(pts.astype(float), mdl.fx, mdl.k1, mdl.cx, mdl.cy)
+        xu = undistort_image_points_to_normalized_camera(pts.astype(float), rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy)
         dcam = np.concatenate([xu, np.ones((len(xu), 1))], 1)
-        dw = dcam @ R[fi].T
+        dw = dcam @ camera_rotations[fi].T
         dw /= np.linalg.norm(dw, axis=1, keepdims=True)
-        P = ray_surface_intersect(C[fi], dw, surf, mdl.depth(frames[fi]))
-        return np.stack(tp.to_uv(P[:, 0], P[:, 1]), 1)
+        points = ray_surface_intersect(camera_centers[fi], dw, surf, rig_model.depth(frames[fi]))
+        return np.stack(texture_parameters.to_uv(points[:, 0], points[:, 1]), 1)
 
     # collect correspondences in map (u,v); centre for conditioning
     corr = []
     rng = np.random.default_rng(0)
-    for p in pairs:
-        m = len(p.src)
-        if m == 0:
+    for point in pairs:
+        mask = len(point.src)
+        if mask == 0:
             continue
-        sel = rng.permutation(m)[:max_per_pair]
-        corr.append((p.i, to_uv(p.src[sel], p.i), p.j, to_uv(p.dst[sel], p.j)))
+        sel = rng.permutation(mask)[:max_per_pair]
+        corr.append((point.i, to_uv(point.src[sel], point.i), point.j, to_uv(point.dst[sel], point.j)))
     if not corr:
         return None
-    allu = np.concatenate([c[1] for c in corr] + [c[3] for c in corr])
+    allu = np.concatenate([candidate[1] for candidate in corr] + [candidate[3] for candidate in corr])
     umid, vmid = float(allu[:, 0].mean()), float(allu[:, 1].mean())
 
     nb = 3 if order == 1 else 6
 
     def basis(du, dv):
-        b = [du, dv, 1.0]
+        surface_warp_basis = [du, dv, 1.0]
         if nb == 6:
             # quadratic terms scaled to linear-column magnitude (mm^2/50)
             # for LSQR conditioning; geom/GpuGeom apply the same 1/50
-            b += [du * du / 50.0, du * dv / 50.0, dv * dv / 50.0]
-        return b
+            surface_warp_basis += [du * du / 50.0, du * dv / 50.0, dv * dv / 50.0]
+        return surface_warp_basis
 
     II, JJ, VV, bu, bv = [], [], [], [], []
     row = 0
     for fi, Ui, fj, Uj in corr:
-        for k in range(len(Ui)):
-            ai = basis(Ui[k, 0] - umid, Ui[k, 1] - vmid)
-            aj = basis(Uj[k, 0] - umid, Uj[k, 1] - vmid)
+        for item_index in range(len(Ui)):
+            ai = basis(Ui[item_index, 0] - umid, Ui[item_index, 1] - vmid)
+            aj = basis(Uj[item_index, 0] - umid, Uj[item_index, 1] - vmid)
             II += [row] * (2 * nb)
-            JJ += [nb * fi + t for t in range(nb)] + [nb * fj + t for t in range(nb)]
-            VV += ai + [-x for x in aj]
-            bu.append(-(Ui[k, 0] - Uj[k, 0]))
-            bv.append(-(Ui[k, 1] - Uj[k, 1]))
+            JJ += [nb * fi + threshold for threshold in range(nb)] + [nb * fj + threshold for threshold in range(nb)]
+            VV += ai + [-surface_x for surface_x in aj]
+            bu.append(-(Ui[item_index, 0] - Uj[item_index, 0]))
+            bv.append(-(Ui[item_index, 1] - Uj[item_index, 1]))
             row += 1
     ndata = row
     # regularise: pull each frame's footprint-sample displacement toward 0
     # (penalises warp magnitude uniformly in mm -> small, smooth = breathing
     # only). The quadratic warp gets denser anchors: 6 params/axis need
     # well-spread samples to stay bounded across the whole footprint.
-    for f in frames:
-        fp = compute_camera_frame_surface_footprint(f, R, C, mdl, surf)
-        fu, fv = tp.to_uv(fp[:, 0], fp[:, 1])
-        for c in range(0, len(fu), max(1, len(fu) // (4 if nb == 3 else 10))):
-            bb = basis(fu[c] - umid, fv[c] - vmid)
+    for frame in frames:
+        fp = compute_camera_frame_surface_footprint(frame, camera_rotations, camera_centers, rig_model, surf)
+        fu, fv = texture_parameters.to_uv(fp[:, 0], fp[:, 1])
+        for candidate in range(0, len(fu), max(1, len(fu) // (4 if nb == 3 else 10))):
+            bb = basis(fu[candidate] - umid, fv[candidate] - vmid)
             II += [row] * nb
-            JJ += [nb * f.idx + t for t in range(nb)]
-            VV += [reg * x for x in bb]
+            JJ += [nb * frame.idx + threshold for threshold in range(nb)]
+            VV += [reg * surface_x for surface_x in bb]
             bu.append(0.0)
             bv.append(0.0)
             row += 1
 
-    A = sp.coo_matrix((VV, (II, JJ)), shape=(row, nb * n)).tocsr()
+    points_a = sp.coo_matrix((VV, (II, JJ)), shape=(row, nb * item_count)).tocsr()
     bu = np.array(bu)
     bv = np.array(bv)
-    Mu = spla.lsqr(A, bu)[0].reshape(n, nb)
-    Mv = spla.lsqr(A, bv)[0].reshape(n, nb)
+    Mu = spla.lsqr(points_a, bu)[0].reshape(item_count, nb)
+    Mv = spla.lsqr(points_a, bv)[0].reshape(item_count, nb)
     # runaway guard: a per-frame "breathing" correction of tens of mm is
     # never physical -- it means the frame's few (usually grazing-flank,
     # one-sided) correspondences conflict with its BA pose, and warping its
@@ -307,7 +353,7 @@ def align_frames_with_deformable_surface_warps(
         print(
             f"      ! zeroed runaway warp on {len(bad)} frame(s) "
             f"(|centre shift| > {lim:.1f}mm): "
-            + ", ".join(f"frame {frames[b].idx} ({mag[b]:.1f}mm)" for b in bad[:6])
+            + ", ".join(f"frame {frames[second_value].idx} ({mag[second_value]:.1f}mm)" for second_value in bad[:6])
         )
         Mu[bad] = 0.0
         Mv[bad] = 0.0
@@ -315,7 +361,7 @@ def align_frames_with_deformable_surface_warps(
     # report correction magnitude + how much pair disagreement the warp
     # removed: the POST residual is what still cuts hairs at HF-winner seams
     pre = np.hypot(bu[:ndata], bv[:ndata])
-    Ad = A[:ndata]
+    Ad = points_a[:ndata]
     post = np.hypot(Ad @ Mu.ravel() - bu[:ndata], Ad @ Mv.ravel() - bv[:ndata])
     print(
         f"      deformable align (order {order}): {row} eqns, "

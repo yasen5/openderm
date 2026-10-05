@@ -33,25 +33,31 @@ class GpuMatcher:
         self._cache: dict[int, "torch.Tensor"] = {}
 
     def _tens(self, key: int, des: np.ndarray):
-        t = self._cache.get(key)
-        if t is None:
-            t = torch.from_numpy(np.ascontiguousarray(des)).to(self.dev)
-            self._cache[key] = t
-        return t
+        cached_descriptors = self._cache.get(key)
+        if cached_descriptors is None:
+            cached_descriptors = torch.from_numpy(np.ascontiguousarray(des)).to(self.dev)
+            self._cache[key] = cached_descriptors
+        return cached_descriptors
 
     def knn2(self, key_q: int, des_q: np.ndarray, key_t: int, des_t: np.ndarray):
         """Top-2 L2 neighbours of every query descriptor in the train set.
         Returns (d1, d2, nn1) numpy arrays; d2 is +inf when the train set has
         a single descriptor (ratio test then rejects, same as FLANN k=2)."""
-        q = self._tens(key_q, des_q)
-        t = self._tens(key_t, des_t)
-        d = torch.cdist(q[None], t[None])[0]
-        k = min(2, t.shape[0])
-        vals, idxs = torch.topk(d, k=k, dim=1, largest=False)
-        if k == 1:
-            d1 = vals[:, 0].cpu().numpy()
-            return d1, np.full_like(d1, np.inf), idxs[:, 0].cpu().numpy()
-        return (vals[:, 0].cpu().numpy(), vals[:, 1].cpu().numpy(), idxs[:, 0].cpu().numpy())
+        query_descriptors = self._tens(key_q, des_q)
+        train_descriptors = self._tens(key_t, des_t)
+        pairwise_distances = torch.cdist(query_descriptors[None], train_descriptors[None])[0]
+        neighbor_count = min(2, train_descriptors.shape[0])
+        nearest_distances, nearest_indices = torch.topk(
+            pairwise_distances, k=neighbor_count, dim=1, largest=False
+        )
+        if neighbor_count == 1:
+            first_neighbor_distances = nearest_distances[:, 0].cpu().numpy()
+            return first_neighbor_distances, np.full_like(first_neighbor_distances, np.inf), nearest_indices[:, 0].cpu().numpy()
+        return (
+            nearest_distances[:, 0].cpu().numpy(),
+            nearest_distances[:, 1].cpu().numpy(),
+            nearest_indices[:, 0].cpu().numpy(),
+        )
 
     def clear(self):
         self._cache.clear()

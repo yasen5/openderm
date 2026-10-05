@@ -33,13 +33,13 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         )
     row_range = station_range = col_range = None
     if args.rows:
-        lo, _, hi = args.rows.partition(":")
+        lo, range_separator, hi = args.rows.partition(":")
         row_range = (int(lo), int(hi or lo))
     if args.stations:
-        lo, _, hi = args.stations.partition(":")
+        lo, range_separator, hi = args.stations.partition(":")
         station_range = (int(lo), int(hi or lo))
     if args.cols:
-        lo, _, hi = args.cols.partition(":")
+        lo, range_separator, hi = args.cols.partition(":")
         col_range = (int(lo), int(hi or lo))
 
     print(f"[1/9] loading frames from {args.capture_dir}")
@@ -49,7 +49,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         sys.exit(1)
     print(
         f"      {len(frames)} frames, rows "
-        f"{min(f.row for f in frames)}..{max(f.row for f in frames)}"
+        f"{min(frame.row for frame in frames)}..{max(frame.row for frame in frames)}"
     )
 
     # Features and matches are computed in the sensor frame with EXIF
@@ -64,7 +64,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         max_partners=args.max_partners,
         n=len(frames),
         src="jpeg",
-        stations=tuple(f.station for f in frames),
+        stations=tuple(frame.station for frame in frames),
     )
     cache_path = os.path.join(out_dir, "cache_pairs.pkl")
     cached = None
@@ -90,19 +90,19 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         h0, w0 = frames[0].shape
     else:
         h0, w0 = cached["shape"]
-        for f in frames:
-            f.shape = (h0, w0)
+        for frame in frames:
+            frame.shape = (h0, w0)
     diag = math.hypot(w0, h0)
 
     if cached is None:
         print("[3/9] matching consecutive pairs")
         cpairs = []
-        for k in range(len(frames) - 1):
-            p = match_camera_frame_pair_keypoints(frames[k], frames[k + 1], args.ratio, args.min_inliers)
-            if p is None:
-                print(f"  ! consecutive pair {k}->{k + 1} FAILED")
+        for item_index in range(len(frames) - 1):
+            point = match_camera_frame_pair_keypoints(frames[item_index], frames[item_index + 1], args.ratio, args.min_inliers)
+            if point is None:
+                print(f"  ! consecutive pair {item_index}->{item_index + 1} FAILED")
                 continue
-            cpairs.append(p)
+            cpairs.append(point)
         print(f"      {len(cpairs)}/{len(frames) - 1} consecutive pairs matched")
         # same-column partners in the next row: these excite the y direction,
         # without which the rig-model pre-fit is rank-deficient (in-row pairs
@@ -110,16 +110,16 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         print("      matching cross-row pairs for the pre-fit")
         xpairs = []
         byrow: dict[int, list] = {}
-        for f in frames:
-            byrow.setdefault(f.row, []).append(f)
-        for r in sorted(byrow):
-            if r + 1 not in byrow:
+        for frame in frames:
+            byrow.setdefault(frame.row, []).append(frame)
+        for camera_rotation in sorted(byrow):
+            if camera_rotation + 1 not in byrow:
                 continue
-            for f in byrow[r][::2]:
-                g_ = min(byrow[r + 1], key=lambda q: abs(q.g[0] - f.g[0]))
-                p = match_camera_frame_pair_keypoints(f, g_, args.ratio, args.min_inliers)
-                if p is not None:
-                    xpairs.append(p)
+            for frame in byrow[camera_rotation][::2]:
+                g_ = min(byrow[camera_rotation + 1], key=lambda query: abs(query.g[0] - frame.g[0]))
+                point = match_camera_frame_pair_keypoints(frame, g_, args.ratio, args.min_inliers)
+                if point is not None:
+                    xpairs.append(point)
         print(f"      {len(xpairs)} cross-row pairs matched")
     else:
         cpairs = cached["cpairs"]
@@ -128,7 +128,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
     if args.rig_from:
         print(f"[4/9] rig model loaded from {args.rig_from} (pre-fit skipped)")
         rj = json.load(open(args.rig_from))["rig_model"]
-        mdl = RigModel(
+        rig_model = RigModel(
             fx=float(rj["fx_fullres_px"]) / args.downscale,
             k1=float(rj["k1"]),
             cx=w0 / 2.0,
@@ -145,21 +145,21 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
     else:
         print("[4/9] rig-model pre-fit (fx seed, lever arm, mount, rx sign)")
         # rough fx init: median consecutive-pair shift per 10mm gantry step at Z~110
-        ts = np.array([[p.tx, p.ty] for p in cpairs])
+        ts = np.array([[point.tx, point.ty] for point in cpairs])
         fx0 = float(np.median(np.linalg.norm(ts, axis=1)) / 10.0 * 110.0)
-        mdl, prefit_rms = estimate_initial_rig_camera_model(frames, cpairs + xpairs, w0, h0, args.downscale, fx0)
+        rig_model, prefit_rms = estimate_initial_rig_camera_model(frames, cpairs + xpairs, w0, h0, args.downscale, fx0)
     if args.fx_full:
-        mdl.fx = args.fx_full / args.downscale
+        rig_model.fx = args.fx_full / args.downscale
         print(
-            f"      fx LOCKED to {args.fx_full:.0f} full px ({mdl.fx:.1f} ds-px); "
+            f"      fx LOCKED to {args.fx_full:.0f} full px ({rig_model.fx:.1f} ds-px); "
             f"lever/dz0 will re-anchor during BA"
         )
-    R0, C0 = mdl.poses(frames)
+    R0, C0 = rig_model.poses(frames)
     axis = R0[len(frames) // 2][:, 2]
     print(
-        f"      fx={mdl.fx:.0f}ds-px ({mdl.fx * args.downscale:.0f} full px), "
-        f"px/mm≈{mdl.fx / 110:.1f} (ds), lever=({mdl.lever[0]:.1f},{mdl.lever[1]:.1f},"
-        f"{mdl.lever[2]:.1f})mm |{np.linalg.norm(mdl.lever):.1f}mm|, dz0={mdl.dz0:.1f}mm"
+        f"      fx={rig_model.fx:.0f}ds-px ({rig_model.fx * args.downscale:.0f} full px), "
+        f"px/mm≈{rig_model.fx / 110:.1f} (ds), lever=({rig_model.lever[0]:.1f},{rig_model.lever[1]:.1f},"
+        f"{rig_model.lever[2]:.1f})mm |{np.linalg.norm(rig_model.lever):.1f}mm|, dz0={rig_model.dz0:.1f}mm"
     )
     print(f"      mid-scan optical axis (world): ({axis[0]:+.3f},{axis[1]:+.3f},{axis[2]:+.3f})")
 
@@ -169,30 +169,30 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
             f"top-{args.max_partners}/frame)"
         )
         keep, overlaps = find_overlapping_frame_pairs(
-            mdl, frames, R0, C0, args.overlap_frac, args.max_partners
+            rig_model, frames, R0, C0, args.overlap_frac, args.max_partners
         )
-        existing = {(p.i, p.j) for p in cpairs} | {(p.i, p.j) for p in xpairs}
+        existing = {(point.i, point.j) for point in cpairs} | {(point.i, point.j) for point in xpairs}
         to_match = sorted(ij for ij in keep if ij not in existing)
         print(f"      {len(overlaps)} candidate pairs -> matching {len(to_match)} extra")
         pairs = list(cpairs) + list(xpairs)
         added = rejected = 0
         t0 = time.time()
-        for n_, (i, j) in enumerate(to_match):
-            tpred = predict_frame_pair_translation(mdl, frames, R0, C0, i, j)
-            p = match_camera_frame_pair_keypoints(
-                frames[i],
-                frames[j],
+        for n_, (index, neighbor_index) in enumerate(to_match):
+            tpred = predict_frame_pair_translation(rig_model, frames, R0, C0, index, neighbor_index)
+            point = match_camera_frame_pair_keypoints(
+                frames[index],
+                frames[neighbor_index],
                 args.ratio,
                 args.min_inliers,
                 prior_xy=tuple(tpred),
                 prior_tol=0.25 * diag,
             )
-            if p is None:
+            if point is None:
                 continue
-            if math.hypot(p.tx - tpred[0], p.ty - tpred[1]) > 0.2 * diag:
+            if math.hypot(point.tx - tpred[0], point.ty - tpred[1]) > 0.2 * diag:
                 rejected += 1
                 continue
-            pairs.append(p)
+            pairs.append(point)
             added += 1
             if n_ % 100 == 99:
                 print(f"        {n_ + 1}/{len(to_match)} ({time.time() - t0:.0f}s)")
@@ -206,15 +206,15 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
                         xpairs=xpairs,
                         pairs=pairs,
                         shape=(h0, w0),
-                        kps=[[kp.pt for kp in f.kp] for f in frames],
+                        kps=[[kp.pt for kp in frame.kp] for frame in frames],
                     ),
                     fh,
                 )
     else:
         pairs = cached["pairs"]
         # rebuild minimal kp lists for track building
-        for f, kps in zip(frames, cached["kps"]):
-            f.kp = [registration_features._KPt(tuple(p)) for p in kps]
+        for frame, kps in zip(frames, cached["kps"]):
+            frame.kp = [registration_features._KPt(tuple(point)) for point in kps]
 
     if registration_features._GPU_MATCHER is not None:
         registration_features._GPU_MATCHER.clear()  # free descriptor VRAM before render
@@ -223,7 +223,7 @@ def build_scan_reconstruction_problem(args, mem_cap=None):
         out_dir=out_dir,
         frames=frames,
         pairs=pairs,
-        mdl=mdl,
+        rig_model=rig_model,
         prefit_rms=prefit_rms,
         R0=R0,
         C0=C0,

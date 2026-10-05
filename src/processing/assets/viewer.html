@@ -45,18 +45,18 @@
 <script id="orbit_b64" type="text/plain">__ORBIT_B64__</script>
 <script>
 (async () => {
- const $ = id => document.getElementById(id);
+ const get_element_by_id = id => document.getElementById(id);
  const b64text = id => {
-   const b = $(id).textContent.trim();
-   if (!b) return null;
-   const bin = atob(b); const a = new Uint8Array(bin.length);
-   for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
-   return new TextDecoder().decode(a);
+   const encoded_text = get_element_by_id(id).textContent.trim();
+   if (!encoded_text) return null;
+   const bin = atob(encoded_text); const decoded_bytes = new Uint8Array(bin.length);
+   for (let byte_index = 0; byte_index < bin.length; byte_index++) decoded_bytes[byte_index] = bin.charCodeAt(byte_index);
+   return new TextDecoder().decode(decoded_bytes);
  };
- const b64buf = s => {
-   const bin = atob(s); const a = new Uint8Array(bin.length);
-   for (let i = 0; i < bin.length; i++) a[i] = bin.charCodeAt(i);
-   return a.buffer;
+ const b64buf = encoded_text => {
+   const bin = atob(encoded_text); const decoded_bytes = new Uint8Array(bin.length);
+   for (let byte_index = 0; byte_index < bin.length; byte_index++) decoded_bytes[byte_index] = bin.charCodeAt(byte_index);
+   return decoded_bytes.buffer;
  };
  let THREE, OrbitControls;
  try {
@@ -71,9 +71,9 @@
      THREE = await import('https://unpkg.com/three@0.160.0/build/three.module.min.js');
      OrbitControls = (await import('https://unpkg.com/three@0.160.0/examples/jsm/controls/OrbitControls.js')).OrbitControls;
    }
- } catch (e) { $('err').style.display = 'block'; console.error(e); return; }
+ } catch (import_error) { get_element_by_id('err').style.display = 'block'; console.error(import_error); return; }
 
- const P = JSON.parse($('payload').textContent);
+ const payload = JSON.parse(get_element_by_id('payload').textContent);
  const renderer = new THREE.WebGLRenderer({antialias:true, preserveDrawingBuffer:true});
  renderer.setPixelRatio(devicePixelRatio);
  renderer.setSize(innerWidth, innerHeight);
@@ -83,145 +83,145 @@
  const camera = new THREE.PerspectiveCamera(45, innerWidth/innerHeight, 1, 10000);
 
  // ---- mesh -------------------------------------------------------------
- const geo = new THREE.BufferGeometry();
- geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b64buf(P.mesh.positions)), 3));
- geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(b64buf(P.mesh.uvs)), 2));
- geo.setIndex(new THREE.BufferAttribute(new Uint32Array(b64buf(P.mesh.indices)), 1));
- geo.computeVertexNormals();
- geo.computeBoundingBox();
- const bb = geo.boundingBox, ctr = new THREE.Vector3();
- bb.getCenter(ctr);
- const diag = bb.min.distanceTo(bb.max);
+ const surface_geometry = new THREE.BufferGeometry();
+ surface_geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b64buf(payload.mesh.positions)), 3));
+ surface_geometry.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(b64buf(payload.mesh.uvs)), 2));
+ surface_geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(b64buf(payload.mesh.indices)), 1));
+ surface_geometry.computeVertexNormals();
+ surface_geometry.computeBoundingBox();
+ const surface_bounding_box = surface_geometry.boundingBox, surface_center = new THREE.Vector3();
+ surface_bounding_box.getCenter(surface_center);
+ const surface_diagonal = surface_bounding_box.min.distanceTo(surface_bounding_box.max);
 
- const tex = new THREE.TextureLoader().load(P.texture, t => {
-   t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+ const surface_texture = new THREE.TextureLoader().load(payload.texture, loaded_texture => {
+   loaded_texture.colorSpace = THREE.SRGBColorSpace; loaded_texture.anisotropy = renderer.capabilities.getMaxAnisotropy();
  });
- const matTex = new THREE.MeshBasicMaterial({map: tex, side: THREE.DoubleSide});
- const matShade = new THREE.MeshStandardMaterial({map: tex, side: THREE.DoubleSide,
+ const textured_material = new THREE.MeshBasicMaterial({map: surface_texture, side: THREE.DoubleSide});
+ const shaded_material = new THREE.MeshStandardMaterial({map: surface_texture, side: THREE.DoubleSide,
    roughness: 0.85, metalness: 0.0});
- const matPlain = new THREE.MeshStandardMaterial({color: 0xb89880, side: THREE.DoubleSide,
+ const plain_material = new THREE.MeshStandardMaterial({color: 0xb89880, side: THREE.DoubleSide,
    roughness: 0.9});
- const mesh = new THREE.Mesh(geo, matTex);
+ const mesh = new THREE.Mesh(surface_geometry, textured_material);
  scene.add(mesh);
- const wire = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({wireframe: true,
+ const wire = new THREE.Mesh(surface_geometry, new THREE.MeshBasicMaterial({wireframe: true,
    color: 0x44ff88, transparent: true, opacity: 0.25}));
  wire.visible = false; scene.add(wire);
 
  scene.add(new THREE.HemisphereLight(0xffffff, 0x404060, 1.1));
- const dl = new THREE.DirectionalLight(0xffffff, 1.2);
- dl.position.set(ctr.x + diag, ctr.y - diag, ctr.z + diag); scene.add(dl);
+ const directional_light = new THREE.DirectionalLight(0xffffff, 1.2);
+ directional_light.position.set(surface_center.x + surface_diagonal, surface_center.y - surface_diagonal, surface_center.z + surface_diagonal); scene.add(directional_light);
 
  // ---- cameras ------------------------------------------------------------
- const cgeo = new THREE.BufferGeometry();
- cgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b64buf(P.cameras.segments)), 3));
- cgeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(b64buf(P.cameras.colors)), 3));
- const cams = new THREE.LineSegments(cgeo, new THREE.LineBasicMaterial({vertexColors: true,
+ const camera_geometry = new THREE.BufferGeometry();
+ camera_geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b64buf(payload.cameras.segments)), 3));
+ camera_geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(b64buf(payload.cameras.colors)), 3));
+ const camera_frustums = new THREE.LineSegments(camera_geometry, new THREE.LineBasicMaterial({vertexColors: true,
    transparent: true, opacity: 0.55}));
- cams.visible = false; scene.add(cams);
+ camera_frustums.visible = false; scene.add(camera_frustums);
 
  // ---- landmarks ----------------------------------------------------------
- const lgeo = new THREE.BufferGeometry();
- lgeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b64buf(P.landmarks.positions)), 3));
- lgeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(b64buf(P.landmarks.colors)), 3));
- const lm = new THREE.Points(lgeo, new THREE.PointsMaterial({vertexColors: true, size: 0.35}));
- lm.visible = false; scene.add(lm);
+ const landmark_geometry = new THREE.BufferGeometry();
+ landmark_geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(b64buf(payload.landmarks.positions)), 3));
+ landmark_geometry.setAttribute('color', new THREE.BufferAttribute(new Float32Array(b64buf(payload.landmarks.colors)), 3));
+ const landmark_points = new THREE.Points(landmark_geometry, new THREE.PointsMaterial({vertexColors: true, size: 0.35}));
+ landmark_points.visible = false; scene.add(landmark_points);
 
  // ---- grid + axes ---------------------------------------------------------
- const grid = new THREE.GridHelper(Math.ceil(diag/100)*100, Math.ceil(diag/100)*10,
+ const grid = new THREE.GridHelper(Math.ceil(surface_diagonal/100)*100, Math.ceil(surface_diagonal/100)*10,
    0x39455c, 0x222a38);
  grid.rotation.x = Math.PI/2;
- grid.position.set(ctr.x, ctr.y, bb.min.z - 4);
+ grid.position.set(surface_center.x, surface_center.y, surface_bounding_box.min.z - 4);
  scene.add(grid);
  const axes = new THREE.AxesHelper(30);
- axes.position.set(bb.min.x - 10, bb.min.y - 10, bb.min.z);
+ axes.position.set(surface_bounding_box.min.x - 10, surface_bounding_box.min.y - 10, surface_bounding_box.min.z);
  scene.add(axes);
 
  // ---- controls + views -----------------------------------------------------
  const controls = new OrbitControls(camera, renderer.domElement);
- controls.target.copy(ctr);
+ controls.target.copy(surface_center);
  controls.enableDamping = true; controls.dampingFactor = 0.12;
- function setView(dx, dy, dz, d) {
-   d = d || diag * 1.1;
-   camera.position.set(ctr.x + dx*d, ctr.y + dy*d, ctr.z + dz*d);
-   camera.up.set(0, dz === 0 ? 0 : -1, dz === 0 ? 1 : 0);
-   controls.target.copy(ctr); controls.update();
+ function setView(camera_offset_x, camera_offset_y, camera_offset_z, view_distance) {
+   view_distance = view_distance || surface_diagonal * 1.1;
+   camera.position.set(surface_center.x + camera_offset_x*view_distance, surface_center.y + camera_offset_y*view_distance, surface_center.z + camera_offset_z*view_distance);
+   camera.up.set(0, camera_offset_z === 0 ? 0 : -1, camera_offset_z === 0 ? 1 : 0);
+   controls.target.copy(surface_center); controls.update();
  }
  setView(0.25, 0.55, 0.8);
- $('bt_top').onclick   = () => setView(0, 0.001, 1);
- $('bt_front').onclick = () => setView(0, -1, 0.15);
- $('bt_side').onclick  = () => setView(1, 0, 0.15);
- $('bt_reset').onclick = () => setView(0.25, 0.55, 0.8);
- $('bt_shot').onclick  = () => {
+ get_element_by_id('bt_top').onclick   = () => setView(0, 0.001, 1);
+ get_element_by_id('bt_front').onclick = () => setView(0, -1, 0.15);
+ get_element_by_id('bt_side').onclick  = () => setView(1, 0, 0.15);
+ get_element_by_id('bt_reset').onclick = () => setView(0.25, 0.55, 0.8);
+ get_element_by_id('bt_shot').onclick  = () => {
    renderer.render(scene, camera);
-   const a = document.createElement('a');
-   a.href = renderer.domElement.toDataURL('image/png');
-   a.download = 'skin_scan_3d.png'; a.click();
+   const download_link = document.createElement('a');
+   download_link.href = renderer.domElement.toDataURL('image/png');
+   download_link.download = 'skin_scan_3d.png'; download_link.click();
  };
 
  // ---- toggles --------------------------------------------------------------
  function updateMat() {
-   const t = $('cb_tex').checked, s = $('cb_shade').checked;
-   mesh.material = t ? (s ? matShade : matTex) : matPlain;
+   const texture_enabled = get_element_by_id('cb_tex').checked, shading_enabled = get_element_by_id('cb_shade').checked;
+   mesh.material = texture_enabled ? (shading_enabled ? shaded_material : textured_material) : plain_material;
  }
- $('cb_tex').onchange = updateMat;
- $('cb_shade').onchange = updateMat;
- $('cb_wire').onchange = e => wire.visible = e.target.checked;
- $('cb_cams').onchange = e => cams.visible = e.target.checked;
- $('cb_lm').onchange   = e => lm.visible = e.target.checked;
- $('cb_grid').onchange = e => grid.visible = e.target.checked;
+ get_element_by_id('cb_tex').onchange = updateMat;
+ get_element_by_id('cb_shade').onchange = updateMat;
+ get_element_by_id('cb_wire').onchange = change_event => wire.visible = change_event.target.checked;
+ get_element_by_id('cb_cams').onchange = change_event => camera_frustums.visible = change_event.target.checked;
+ get_element_by_id('cb_lm').onchange   = change_event => landmark_points.visible = change_event.target.checked;
+ get_element_by_id('cb_grid').onchange = change_event => grid.visible = change_event.target.checked;
 
  // ---- stats ----------------------------------------------------------------
- const S = P.stats;
- $('stats').textContent =
-   `${S.n_frames} frames · ${S.n_landmarks} landmarks` +
-   `\nreproj RMS ${S.rms_px} px (≈${S.rms_mm} mm)` +
-   `\n${S.px_per_mm} px/mm on skin · area ${S.area_cm2} cm²`;
+ const stats = payload.stats;
+ get_element_by_id('stats').textContent =
+   `${stats.n_frames} frames · ${stats.n_landmarks} landmarks` +
+   `\nreproj RMS ${stats.rms_px} px (≈${stats.rms_mm} mm)` +
+   `\n${stats.px_per_mm} px/mm on skin · area ${stats.area_cm2} cm²`;
 
  // ---- picking: cursor readout + measurement --------------------------------
  const ray = new THREE.Raycaster();
- const ptr = new THREE.Vector2();
- const readout = $('readout'), measEl = $('measure');
- let downXY = null, marks = [], mline = null;
- const mkMark = p => {
-   const m = new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.6, diag/400), 16, 12),
+ const pointer_coordinates = new THREE.Vector2();
+ const readout = get_element_by_id('readout'), measurement_readout = get_element_by_id('measure');
+ let pointer_down_coordinates = null, measurement_markers = [], measurement_line = null;
+ const mkMark = world_point => {
+   const landmark_marker = new THREE.Mesh(new THREE.SphereGeometry(Math.max(0.6, surface_diagonal/400), 16, 12),
      new THREE.MeshBasicMaterial({color: 0xffd479}));
-   m.position.copy(p); scene.add(m); return m;
+   landmark_marker.position.copy(world_point); scene.add(landmark_marker); return landmark_marker;
  };
  function pick(ev) {
-   ptr.x = (ev.clientX/innerWidth)*2 - 1; ptr.y = -(ev.clientY/innerHeight)*2 + 1;
-   ray.setFromCamera(ptr, camera);
+   pointer_coordinates.x = (ev.clientX/innerWidth)*2 - 1; pointer_coordinates.y = -(ev.clientY/innerHeight)*2 + 1;
+   ray.setFromCamera(pointer_coordinates, camera);
    const hit = ray.intersectObject(mesh, false);
    return hit.length ? hit[0].point : null;
  }
- addEventListener('pointermove', ev => {
-   const p = pick(ev);
-   readout.firstChild.textContent = p ?
-     `x ${p.x.toFixed(2)}  y ${p.y.toFixed(2)}  z ${p.z.toFixed(2)} mm ` : 'cursor: — ';
+ addEventListener('pointermove', pointer_event => {
+   const world_point = pick(pointer_event);
+   readout.firstChild.textContent = world_point ?
+     `x ${world_point.x.toFixed(2)}  y ${world_point.y.toFixed(2)}  z ${world_point.z.toFixed(2)} mm ` : 'cursor: — ';
  });
- addEventListener('pointerdown', ev => downXY = [ev.clientX, ev.clientY]);
- addEventListener('pointerup', ev => {
-   if (!downXY) return;
-   const moved = Math.hypot(ev.clientX-downXY[0], ev.clientY-downXY[1]);
-   downXY = null;
-   if (moved > 5 || ev.button !== 0) return;
-   const p = pick(ev);
-   if (!p) return;
-   if (marks.length === 2) { clearMeasure(); }
-   marks.push(mkMark(p));
-   if (marks.length === 2) {
-     const a = marks[0].position, b = marks[1].position;
-     const g = new THREE.BufferGeometry().setFromPoints([a, b]);
-     mline = new THREE.Line(g, new THREE.LineBasicMaterial({color: 0xffd479}));
-     scene.add(mline);
-     measEl.textContent = `measure: ${a.distanceTo(b).toFixed(2)} mm`;
+ addEventListener('pointerdown', pointer_event => pointer_down_coordinates = [pointer_event.clientX, pointer_event.clientY]);
+ addEventListener('pointerup', pointer_event => {
+   if (!pointer_down_coordinates) return;
+   const moved = Math.hypot(pointer_event.clientX-pointer_down_coordinates[0], pointer_event.clientY-pointer_down_coordinates[1]);
+   pointer_down_coordinates = null;
+   if (moved > 5 || pointer_event.button !== 0) return;
+   const world_point = pick(pointer_event);
+   if (!world_point) return;
+   if (measurement_markers.length === 2) { clearMeasure(); }
+   measurement_markers.push(mkMark(world_point));
+   if (measurement_markers.length === 2) {
+     const point_a = measurement_markers[0].position, point_b = measurement_markers[1].position;
+     const measurement_geometry = new THREE.BufferGeometry().setFromPoints([point_a, point_b]);
+     measurement_line = new THREE.Line(measurement_geometry, new THREE.LineBasicMaterial({color: 0xffd479}));
+     scene.add(measurement_line);
+     measurement_readout.textContent = `measure: ${point_a.distanceTo(point_b).toFixed(2)} mm`;
    } else {
-     measEl.textContent = 'measure: pick second point…';
+     measurement_readout.textContent = 'measure: pick second point…';
    }
  });
  function clearMeasure() {
-   marks.forEach(m => scene.remove(m)); marks = [];
-   if (mline) scene.remove(mline); mline = null;
-   measEl.textContent = 'measure: click two points';
+   measurement_markers.forEach(landmark_marker => scene.remove(landmark_marker)); measurement_markers = [];
+   if (measurement_line) scene.remove(measurement_line); measurement_line = null;
+   measurement_readout.textContent = 'measure: click two points';
  }
  addEventListener('dblclick', clearMeasure);
 

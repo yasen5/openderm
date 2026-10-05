@@ -29,77 +29,85 @@ from processing.lesions import (
 from processing.ghost_check import load_reconstruction_rig_and_frames, build_texture_uv_to_world_interpolator, project_world_point_into_source_frame, load_downscaled_source_frame
 
 
-def measure_source_feature_contrast_zscore(im, px, py, ppmm_s, channel):
+def measure_source_feature_contrast_zscore(source_image, pixel_x, pixel_y, pixels_per_mm, channel_name):
     """Feature-vs-skin z-score at a KNOWN pixel: how much darker (mole) or redder
     (angioma) the spot is than its own local skin ring, in robust-sigma units.
     Robust to raw-frame pore noise because it's a local contrast at a fixed
     location -- no blind peak detection / adaptive global threshold."""
-    R = im[:, :, 2].astype(np.float32)
-    G = im[:, :, 1].astype(np.float32)
-    ch = (
-        (np.log(np.maximum(R, 1)) - np.log(np.maximum(G, 1)))
-        if channel == "hem"
-        else -np.log(np.maximum(R, 1))
+    red_channel = source_image[:, :, 2].astype(np.float32)
+    green_channel = source_image[:, :, 1].astype(np.float32)
+    contrast_map = (
+        (np.log(np.maximum(red_channel, 1)) - np.log(np.maximum(green_channel, 1)))
+        if channel_name == "hem"
+        else -np.log(np.maximum(red_channel, 1))
     )  # mole = darker = higher
-    r0 = max(2, int(0.7 * ppmm_s))
-    rout = int(4.5 * ppmm_s)
-    rin = int(2.0 * ppmm_s)
-    x, y = int(round(px)), int(round(py))
-    y0, y1 = max(0, y - rout), min(ch.shape[0], y + rout)
-    x0, x1 = max(0, x - rout), min(ch.shape[1], x + rout)
-    sub = ch[y0:y1, x0:x1]
-    if sub.size < 25:
+    core_radius_px = max(2, int(0.7 * pixels_per_mm))
+    outer_radius_px = int(4.5 * pixels_per_mm)
+    inner_ring_radius_px = int(2.0 * pixels_per_mm)
+    pixel_x, pixel_y = int(round(pixel_x)), int(round(pixel_y))
+    crop_y_min, crop_y_max = max(0, pixel_y - outer_radius_px), min(contrast_map.shape[0], pixel_y + outer_radius_px)
+    crop_x_min, crop_x_max = max(0, pixel_x - outer_radius_px), min(contrast_map.shape[1], pixel_x + outer_radius_px)
+    contrast_crop = contrast_map[crop_y_min:crop_y_max, crop_x_min:crop_x_max]
+    if contrast_crop.size < 25:
         return -99.0
-    yy, xx = np.ogrid[: sub.shape[0], : sub.shape[1]]
-    d = np.hypot(xx - (x - x0), yy - (y - y0))
-    disk = sub[d <= r0]
-    ring = sub[(d >= rin) & (d <= rout)]
-    if disk.size < 3 or ring.size < 20:
-        return -99.0
-    rmed = float(np.median(ring))
-    mad = 1.4826 * float(np.median(np.abs(ring - rmed))) + 1e-6
-    return (float(np.median(disk)) - rmed) / mad
-
-
-def detect_texture_doubling_candidates(tex, cov, ppmm, k_sigma):
-    er = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * ppmm) | 1,) * 2)
-    dm = cv2.erode(cov, er)
-    mel = melanin_flat(tex, cov, ppmm)
-    hem = hemoglobin_flat(tex, cov, ppmm)
-    s = [
-        dict(x=m["x"], y=m["y"], r=m["radius_mm"], ch="mel")
-        for m in detect_moles(mel, dm, ppmm, k_sigma=k_sigma)
-    ] + [
-        dict(x=a["x"], y=a["y"], r=a["radius_mm"], ch="hem")
-        for a in detect_angiomas(tex, hem, mel, dm, ppmm, k_sigma=k_sigma)
+    pixel_y_grid, pixel_x_grid = np.ogrid[: contrast_crop.shape[0], : contrast_crop.shape[1]]
+    center_distance_px = np.hypot(pixel_x_grid - (pixel_x - crop_x_min), pixel_y_grid - (pixel_y - crop_y_min))
+    feature_core_values = contrast_crop[center_distance_px <= core_radius_px]
+    surrounding_skin_values = contrast_crop[
+        (center_distance_px >= inner_ring_radius_px) & (center_distance_px <= outer_radius_px)
     ]
-    return s, dm
+    if feature_core_values.size < 3 or surrounding_skin_values.size < 20:
+        return -99.0
+    skin_median = float(np.median(surrounding_skin_values))
+    skin_mad = 1.4826 * float(np.median(np.abs(surrounding_skin_values - skin_median))) + 1e-6
+    return (float(np.median(feature_core_values)) - skin_median) / skin_mad
+
+
+def detect_texture_doubling_candidates(texture, coverage, pixels_per_mm, robust_sigma_multiplier):
+    er = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (int(3 * pixels_per_mm) | 1,) * 2)
+    detection_coverage_mask = cv2.erode(coverage, er)
+    melanin_channel = melanin_flat(texture, coverage, pixels_per_mm)
+    hemoglobin_channel = hemoglobin_flat(texture, coverage, pixels_per_mm)
+    candidate_features = [
+        dict(pixel_x=mole["x"], pixel_y=mole["y"], radius=mole["radius_mm"], ch="mel")
+        for mole in detect_moles(
+            melanin_channel, detection_coverage_mask, pixels_per_mm,
+            robust_sigma_multiplier=robust_sigma_multiplier
+        )
+    ] + [
+        dict(pixel_x=angioma["x"], pixel_y=angioma["y"], radius=angioma["radius_mm"], ch="hem")
+        for angioma in detect_angiomas(
+            texture, hemoglobin_channel, melanin_channel, detection_coverage_mask,
+            pixels_per_mm, k_sigma=robust_sigma_multiplier
+        )
+    ]
+    return candidate_features, detection_coverage_mask
 
 
 def find_texture_doublings(reg_dir, args):
-    g = load_gauge(reg_dir)
-    ppmm = g.ppmm
+    texture_gauge = load_gauge(reg_dir)
+    pixels_per_mm = texture_gauge.ppmm
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
     cov = coverage_mask(reg_dir)
     gray = cv2.cvtColor(tex, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    cand, dm = detect_texture_doubling_candidates(tex, cov, ppmm, args.k_sigma)
+    cand, dm = detect_texture_doubling_candidates(tex, cov, pixels_per_mm, args.k_sigma)
     covm = dm > 0
-    print(f"  {len(cand)} seed features @ {ppmm:.0f}px/mm", flush=True)
+    print(f"  {len(cand)} seed features @ {pixels_per_mm:.0f}px/mm", flush=True)
 
-    pr = int(args.patch_mm * ppmm)  # half patch
-    sr = int(args.search_mm * ppmm)  # half search window
-    excl = int(args.min_offset_mm * ppmm)
-    H, W = gray.shape
+    pr = int(args.patch_mm * pixels_per_mm)  # half patch
+    sr = int(args.search_mm * pixels_per_mm)  # half search window
+    excl = int(args.min_offset_mm * pixels_per_mm)
+    image_height, image_width = gray.shape
     pairs = []
-    for s in cand:
-        x, y = s["x"], s["y"]
-        if x - pr < 0 or y - pr < 0 or x + pr >= W or y + pr >= H:
+    for score in cand:
+        pixel_x, pixel_y = score["x"], score["y"]
+        if pixel_x - pr < 0 or pixel_y - pr < 0 or pixel_x + pr >= image_width or pixel_y + pr >= image_height:
             continue
-        patch = gray[y - pr : y + pr, x - pr : x + pr]
+        patch = gray[pixel_y - pr : pixel_y + pr, pixel_x - pr : pixel_x + pr]
         if patch.std() < args.min_std:  # featureless skin -> skip
             continue
-        wx0, wy0 = max(0, x - sr), max(0, y - sr)
-        win = gray[wy0 : min(H, y + sr), wx0 : min(W, x + sr)]
+        wx0, wy0 = max(0, pixel_x - sr), max(0, pixel_y - sr)
+        win = gray[wy0 : min(image_height, pixel_y + sr), wx0 : min(image_width, pixel_x + sr)]
         if win.shape[0] <= patch.shape[0] or win.shape[1] <= patch.shape[1]:
             continue
         res = cv2.matchTemplate(win, patch, cv2.TM_CCOEFF_NORMED)
@@ -107,60 +115,66 @@ def find_texture_doublings(reg_dir, args):
         pk = (res == maximum_filter(res, size=int(2 * excl) | 1)) & (res > args.ncc)
         ys, xs = np.where(pk)
         for row_idx, col_idx in zip(ys, xs):
-            dx = (col_idx + pr) - (x - wx0)  # dup_centre - seed_centre (px)
-            dy = (row_idx + pr) - (y - wy0)
-            off = np.hypot(dx, dy) / ppmm
+            dx = (col_idx + pr) - (pixel_x - wx0)  # dup_centre - seed_centre (px)
+            dy = (row_idx + pr) - (pixel_y - wy0)
+            off = np.hypot(dx, dy) / pixels_per_mm
             if off < args.min_offset_mm or off > args.search_mm:
                 continue
-            dupx, dupy = x + dx, y + dy
-            if not (0 <= dupx < W and 0 <= dupy < H and covm[dupy, dupx]):
+            dupx, dupy = pixel_x + dx, pixel_y + dy
+            if not (0 <= dupx < image_width and 0 <= dupy < image_height and covm[dupy, dupx]):
                 continue
             pairs.append(
-                (float(res[row_idx, col_idx]), x, y, int(dupx), int(dupy), float(off), s["ch"])
+                (float(res[row_idx, col_idx]), pixel_x, pixel_y, int(dupx), int(dupy), float(off), score["ch"])
             )
     # dedupe symmetric / overlapping pairs: canonical unordered key at ~3mm grid
     pairs.sort(reverse=True)
     seen, uniq = set(), []
-    q = max(1, int(3 * ppmm))
-    for p in pairs:
-        ncc, x, y, dx, dy, off, ch = p
-        a = (min(x // q, dx // q), min(y // q, dy // q))
-        b = (max(x // q, dx // q), max(y // q, dy // q))
-        key = (a, b)
+    deduplication_grid_size_px = max(1, int(3 * pixels_per_mm))
+    for point in pairs:
+        ncc, pixel_x, pixel_y, dx, dy, off, ch = point
+        first_endpoint_grid_cell = (
+            min(pixel_x // deduplication_grid_size_px, dx // deduplication_grid_size_px),
+            min(pixel_y // deduplication_grid_size_px, dy // deduplication_grid_size_px),
+        )
+        second_endpoint_grid_cell = (
+            max(pixel_x // deduplication_grid_size_px, dx // deduplication_grid_size_px),
+            max(pixel_y // deduplication_grid_size_px, dy // deduplication_grid_size_px),
+        )
+        key = (first_endpoint_grid_cell, second_endpoint_grid_cell)
         if key in seen:
             continue
         seen.add(key)
-        uniq.append(p)
-    return dict(g=g, tex=tex, ppmm=ppmm, pairs=uniq, n_seeds=len(cand))
+        uniq.append(point)
+    return dict(texture_gauge=texture_gauge, tex=tex, pixels_per_mm=pixels_per_mm, pairs=uniq, n_seeds=len(cand))
 
 
 def write_texture_doubling_reports(res, out_dir):
     os.makedirs(os.path.join(out_dir, "pairs"), exist_ok=True)
-    tex, ppmm = res["tex"], res["ppmm"]
+    tex, pixels_per_mm = res["tex"], res["ppmm"]
     ov = tex.copy()
-    for k, (ncc, x, y, dx, dy, off, ch) in enumerate(res["pairs"]):
-        cv2.circle(ov, (x, y), 16, (0, 0, 255), 3)
+    for item_index, (ncc, pixel_x, pixel_y, dx, dy, off, ch) in enumerate(res["pairs"]):
+        cv2.circle(ov, (pixel_x, pixel_y), 16, (0, 0, 255), 3)
         cv2.circle(ov, (dx, dy), 16, (0, 0, 255), 3)
-        cv2.line(ov, (x, y), (dx, dy), (0, 0, 255), 2)
+        cv2.line(ov, (pixel_x, pixel_y), (dx, dy), (0, 0, 255), 2)
         cv2.putText(
             ov,
-            f"{k}:{ncc:.2f}",
-            (min(x, dx), min(y, dy) - 20),
+            f"{item_index}:{ncc:.2f}",
+            (min(pixel_x, dx), min(pixel_y, dy) - 20),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 255),
             2,
         )
-        w = int(6 * ppmm)
-        a = tex[max(0, y - w) : y + w, max(0, x - w) : x + w]
-        b = tex[max(0, dy - w) : dy + w, max(0, dx - w) : dx + w]
-        if a.size and b.size:
-            a = cv2.resize(a, (240, 240))
-            b = cv2.resize(b, (240, 240))
-            cv2.putText(a, "copy A", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            cv2.putText(b, "copy B", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+        crop_radius_px = int(6 * pixels_per_mm)
+        first_patch = tex[max(0, pixel_y - crop_radius_px) : pixel_y + crop_radius_px, max(0, pixel_x - crop_radius_px) : pixel_x + crop_radius_px]
+        second_patch = tex[max(0, dy - crop_radius_px) : dy + crop_radius_px, max(0, dx - crop_radius_px) : dx + crop_radius_px]
+        if first_patch.size and second_patch.size:
+            first_patch = cv2.resize(first_patch, (240, 240))
+            second_patch = cv2.resize(second_patch, (240, 240))
+            cv2.putText(first_patch, "copy A", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            cv2.putText(second_patch, "copy B", (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             cv2.imwrite(
-                os.path.join(out_dir, "pairs", f"pair_{k}_ncc{ncc:.2f}.png"), np.hstack([a, b])
+                os.path.join(out_dir, "pairs", f"pair_{item_index}_ncc{ncc:.2f}.png"), np.hstack([first_patch, second_patch])
             )
     cv2.putText(
         ov,
@@ -179,33 +193,33 @@ def confirm_texture_doublings_from_source_frames(res, reg_dir, args):
     if it's one real feature doubled, NO single frame can show a strong feature
     at BOTH placements; two genuinely-distinct lesions appear at both in most
     covering frames. Returns pairs with a verdict + evidence."""
-    g = res["g"]
-    K, frames = load_reconstruction_rig_and_frames(reg_dir)
-    uv2w = build_texture_uv_to_world_interpolator(reg_dir, g)
+    texture_gauge = res["g"]
+    camera_intrinsics, frames = load_reconstruction_rig_and_frames(reg_dir)
+    uv2w = build_texture_uv_to_world_interpolator(reg_dir, texture_gauge)
     zt = args.z_thresh
     out = []
-    for ncc, x, y, dx, dy, off, ch in res["pairs"]:
-        uA = g.px_to_uv(x, y)
-        uB = g.px_to_uv(dx, dy)
+    for ncc, pixel_x, pixel_y, dx, dy, off, ch in res["pairs"]:
+        uA = texture_gauge.px_to_uv(pixel_x, pixel_y)
+        uB = texture_gauge.px_to_uv(dx, dy)
         PA = uv2w(float(uA[0]), float(uA[1]))
         PB = uv2w(float(uB[0]), float(uB[1]))
         if PA is None or PB is None or np.any(np.isnan(PA)) or np.any(np.isnan(PB)):
-            out.append((ncc, x, y, dx, dy, off, ch, "unknown", 0, 0, 0))
+            out.append((ncc, pixel_x, pixel_y, dx, dy, off, ch, "unknown", 0, 0, 0))
             continue
         PA = np.asarray(PA).ravel()
         PB = np.asarray(PB).ravel()
         both = a_only = b_only = ncov = 0
-        for f in frames:
-            aX, aY, aZ = project_world_point_into_source_frame(PA, f, K)
-            bX, bY, bZ = project_world_point_into_source_frame(PB, f, K)
-            inb = lambda px, py, z: z > 10 and 12 <= px < K["Wf"] - 12 and 12 <= py < K["Hf"] - 12
+        for frame in frames:
+            aX, aY, aZ = project_world_point_into_source_frame(PA, frame, camera_intrinsics)
+            bX, bY, bZ = project_world_point_into_source_frame(PB, frame, camera_intrinsics)
+            inb = lambda px, py, world_z: world_z > 10 and 12 <= px < camera_intrinsics["Wf"] - 12 and 12 <= py < camera_intrinsics["Hf"] - 12
             if not (inb(aX, aY, aZ) and inb(bX, bY, bZ)):
                 continue
-            sds = max(1, round(K["fxf"] / f["standoff"] / args.src_ppmm))
-            im = load_downscaled_source_frame(f["path"], sds)
+            sds = max(1, round(camera_intrinsics["fxf"] / frame["standoff"] / args.src_ppmm))
+            im = load_downscaled_source_frame(frame["path"], sds)
             if im is None:
                 continue
-            pp = K["fxf"] / f["standoff"] / sds
+            pp = camera_intrinsics["fxf"] / frame["standoff"] / sds
             zA = measure_source_feature_contrast_zscore(im, aX / sds, aY / sds, pp, ch)
             zB = measure_source_feature_contrast_zscore(im, bX / sds, bY / sds, pp, ch)
             ncov += 1
@@ -223,7 +237,7 @@ def confirm_texture_doublings_from_source_frames(res, reg_dir, args):
             verdict = "DOUBLING"  # each seen alone, never together
         else:
             verdict = "weak"  # not clearly a feature
-        out.append((ncc, x, y, dx, dy, off, ch, verdict, both, a_only + b_only, ncov))
+        out.append((ncc, pixel_x, pixel_y, dx, dy, off, ch, verdict, both, a_only + b_only, ncov))
     res["confirmed"] = out
     return out
 
@@ -263,16 +277,16 @@ def main():
     conf = confirm_texture_doublings_from_source_frames(res, reg, args)
     write_texture_doubling_reports(res, out)
     order = {"DOUBLING": 0, "distinct": 1, "weak": 2, "unknown": 3}
-    conf.sort(key=lambda c: (order[c[7]], -c[0]))
+    conf.sort(key=lambda candidate: (order[candidate[7]], -candidate[0]))
     ndbl = 0
-    for ncc, x, y, dx, dy, off, ch, verdict, both, alone, ncov in conf:
-        u, v = map_gauge_coordinates_to_texture_uv(res["g"], x, y)
+    for ncc, pixel_x, pixel_y, dx, dy, off, ch, verdict, both, alone, ncov in conf:
+        texture_u, texture_v = map_gauge_coordinates_to_texture_uv(res["g"], pixel_x, pixel_y)
         if verdict == "DOUBLING":
             ndbl += 1
         if verdict in ("DOUBLING", "distinct"):
             print(
                 f"    [{verdict:8}] {ch} off={off:4.1f}mm ncc={ncc:.2f} @ "
-                f"(u={u:.0f},v={v:.0f})mm  frames both={both} alone={alone}/{ncov}",
+                f"(u={texture_u:.0f},v={texture_v:.0f})mm  frames both={both} alone={alone}/{ncov}",
                 flush=True,
             )
     print(
@@ -282,9 +296,9 @@ def main():
     )
 
 
-def map_gauge_coordinates_to_texture_uv(g, x, y):
-    u, v = g.px_to_uv(x, y)
-    return float(u), float(v)
+def map_gauge_coordinates_to_texture_uv(texture_gauge, pixel_x, pixel_y):
+    texture_u, texture_v = texture_gauge.px_to_uv(pixel_x, pixel_y)
+    return float(texture_u), float(texture_v)
 
 
 if __name__ == "__main__":

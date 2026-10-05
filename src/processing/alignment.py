@@ -13,94 +13,104 @@ from .tex_anchor import Gauge, coverage_mask
 IDENT = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
 
 
-def resample_texture_to_common_canvas(reg_dir, g: Gauge, umin, vmin, Wc, Hc, ppmm):
+def resample_texture_to_common_canvas(reg_dir, texture_gauge, umin, vmin, Wc, Hc, pixels_per_mm):
     """Remap a scan's texture + coverage onto the common (u,v)-mm canvas."""
     tex = cv2.imread(os.path.join(reg_dir, "texture.jpg"))
     cov = coverage_mask(reg_dir)
     # common pixel (I,J) -> (u,v)mm -> source pixel (i,j)
     Jc, Ic = np.mgrid[0:Hc, 0:Wc].astype(np.float32)
-    u = umin + (Ic + 0.5) / ppmm
-    v = vmin + (Jc + 0.5) / ppmm
-    sx = ((u - g.umin) * g.ppmm - 0.5).astype(np.float32)
-    sy = ((v - g.vmin) * g.ppmm - 0.5).astype(np.float32)
+    texture_u = umin + (Ic + 0.5) / pixels_per_mm
+    texture_v = vmin + (Jc + 0.5) / pixels_per_mm
+    sx = ((texture_u - texture_gauge.umin) * texture_gauge.ppmm - 0.5).astype(np.float32)
+    sy = ((texture_v - texture_gauge.vmin) * texture_gauge.ppmm - 0.5).astype(np.float32)
     tex_c = cv2.remap(tex, sx, sy, cv2.INTER_CUBIC, borderValue=(40, 40, 40))
     cov_c = cv2.remap(cov, sx, sy, cv2.INTER_NEAREST, borderValue=0)
     return tex_c, (cov_c > 127).astype(np.uint8)
 
 
-def compute_shared_texture_canvas(rdA, gA, rdB, gB, ppmm):
+def compute_shared_texture_canvas(rdA, gA, rdB, gB, pixels_per_mm):
     umin = max(gA.umin, gB.umin)
     umax = min(gA.umax, gB.umax)
     vmin = max(gA.vmin, gB.vmin)
     vmax = min(gA.vmax, gB.vmax)
     if umax <= umin or vmax <= vmin:
         raise SystemExit("ABSTAIN: scans share no (u,v) overlap region.")
-    Wc = int(round((umax - umin) * ppmm))
-    Hc = int(round((vmax - vmin) * ppmm))
-    texA, covA = resample_texture_to_common_canvas(rdA, gA, umin, vmin, Wc, Hc, ppmm)
-    texB, covB = resample_texture_to_common_canvas(rdB, gB, umin, vmin, Wc, Hc, ppmm)
+    Wc = int(round((umax - umin) * pixels_per_mm))
+    Hc = int(round((vmax - vmin) * pixels_per_mm))
+    texA, covA = resample_texture_to_common_canvas(rdA, gA, umin, vmin, Wc, Hc, pixels_per_mm)
+    texB, covB = resample_texture_to_common_canvas(rdB, gB, umin, vmin, Wc, Hc, pixels_per_mm)
     return dict(
-        umin=umin, vmin=vmin, ppmm=ppmm, W=Wc, H=Hc, texA=texA, texB=texB, covA=covA, covB=covB
+        umin=umin, vmin=vmin, ppmm=pixels_per_mm, W=Wc, H=Hc, texA=texA, texB=texB, covA=covA, covB=covB
     )
 
 
-def align_scan_textures_globally(texA, texB, covA, covB, ppmm):
+def align_scan_textures_globally(texA, texB, covA, covB, pixels_per_mm):
     grayA = cv2.cvtColor(texA, cv2.COLOR_BGR2GRAY)
     grayB = cv2.cvtColor(texB, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(16, 16))
     grayA, grayB = clahe.apply(grayA), clahe.apply(grayB)
     sift = cv2.SIFT_create(nfeatures=8000, contrastThreshold=0.008, edgeThreshold=20)
-    kA, dA = sift.detectAndCompute(grayA, covA * 255)
-    kB, dB = sift.detectAndCompute(grayB, covB * 255)
-    info = dict(kpA=len(kA), kpB=len(kB), matches=0, inliers=0, median_resid_mm=None, T_B_to_A=None)
-    if dA is None or dB is None or len(kA) < 8 or len(kB) < 8:
+    keypoints_a, descriptors_a = sift.detectAndCompute(grayA, covA * 255)
+    keypoints_b, descriptors_b = sift.detectAndCompute(grayB, covB * 255)
+    info = dict(kpA=len(keypoints_a), kpB=len(keypoints_b), matches=0, inliers=0, median_resid_mm=None, T_B_to_A=None)
+    if descriptors_a is None or descriptors_b is None or len(keypoints_a) < 8 or len(keypoints_b) < 8:
         return None, info
     flann = cv2.FlannBasedMatcher(dict(algorithm=1, trees=5), dict(checks=64))
-    raw = flann.knnMatch(dB, dA, k=2)  # query=B, train=A
-    good = [m for m, n in raw if m.distance < 0.75 * n.distance]
-    info["matches"] = len(good)
-    if len(good) < 6:
+    raw = flann.knnMatch(descriptors_b, descriptors_a, k=2)  # query=B, train=A
+    good_matches = [
+        first_neighbor_match
+        for first_neighbor_match, second_neighbor_match in raw
+        if first_neighbor_match.distance < 0.75 * second_neighbor_match.distance
+    ]
+    info["matches"] = len(good_matches)
+    if len(good_matches) < 6:
         return None, info
-    ptsB = np.float32([kB[m.queryIdx].pt for m in good])
-    ptsA = np.float32([kA[m.trainIdx].pt for m in good])
-    T, inl = cv2.estimateAffinePartial2D(
-        ptsB, ptsA, method=cv2.RANSAC, ransacReprojThreshold=4.0, maxIters=5000, confidence=0.999
+    points_b = np.float32(
+        [keypoints_b[match.queryIdx].pt for match in good_matches]
     )
-    if T is None:
+    points_a = np.float32(
+        [keypoints_a[match.trainIdx].pt for match in good_matches]
+    )
+    transform_matrix, inlier_mask = cv2.estimateAffinePartial2D(
+        points_b, points_a, method=cv2.RANSAC, ransacReprojThreshold=4.0, maxIters=5000, confidence=0.999
+    )
+    if transform_matrix is None:
         return None, info
-    inl = inl.ravel().astype(bool)
-    mapped = (ptsB[inl] @ T[:, :2].T) + T[:, 2]
-    resid = np.linalg.norm(mapped - ptsA[inl], axis=1) / ppmm
-    scale = float(np.hypot(T[0, 0], T[0, 1]))
-    rot_deg = float(np.degrees(np.arctan2(T[1, 0], T[0, 0])))
+    inlier_mask = inlier_mask.ravel().astype(bool)
+    mapped_points = (points_b[inlier_mask] @ transform_matrix[:, :2].T) + transform_matrix[:, 2]
+    residuals_mm = np.linalg.norm(mapped_points - points_a[inlier_mask], axis=1) / pixels_per_mm
+    scale = float(np.hypot(transform_matrix[0, 0], transform_matrix[0, 1]))
+    rot_deg = float(np.degrees(np.arctan2(transform_matrix[1, 0], transform_matrix[0, 0])))
     # spatial spread of inliers: a trustworthy fit is constrained over area, not
     # a degenerate clump (which yields a spuriously tiny residual).
-    inl_pts = ptsA[inl]
+    inlier_points_a = points_a[inlier_mask]
     spread_mm = (
-        float(np.hypot(*(inl_pts.max(0) - inl_pts.min(0))) / ppmm) if inl.sum() >= 2 else 0.0
+        float(np.hypot(*(inlier_points_a.max(0) - inlier_points_a.min(0))) / pixels_per_mm)
+        if inlier_mask.sum() >= 2
+        else 0.0
     )
     info.update(
-        inliers=int(inl.sum()),
-        median_resid_mm=float(np.median(resid)) if inl.any() else None,
+        inliers=int(inlier_mask.sum()),
+        median_resid_mm=float(np.median(residuals_mm)) if inlier_mask.any() else None,
         scale=scale,
         rotation_deg=rot_deg,
         tx_mm=float(
-            T[0, 2] / ppmm + 0  # translation reported in canvas mm
+            transform_matrix[0, 2] / pixels_per_mm + 0  # translation reported in canvas mm
         ),
-        ty_mm=float(T[1, 2] / ppmm),
+        ty_mm=float(transform_matrix[1, 2] / pixels_per_mm),
         inlier_spread_mm=spread_mm,
-        T_B_to_A=T.tolist(),
+        T_B_to_A=transform_matrix.tolist(),
         # Retained for the registration-uncertainty field (per-inlier
         # A-frame position + B-frame source, so residual can be recomputed
         # against whichever transform is finally chosen).
-        inlier_dst_A_px=inl_pts.tolist(),
-        inlier_src_B_px=ptsB[inl].tolist(),
-        inlier_resid_mm=resid.tolist(),
+        inlier_dst_A_px=inlier_points_a.tolist(),
+        inlier_src_B_px=points_b[inlier_mask].tolist(),
+        inlier_resid_mm=residuals_mm.tolist(),
     )
-    return T, info
+    return transform_matrix, info
 
 
-def estimate_scan_alignment_from_moles(molesA, molesB, ppmm, tol_mm=3.0, min_inliers=3, min_sep_mm=8.0):
+def estimate_scan_alignment_from_moles(molesA, molesB, pixels_per_mm, tol_mm=3.0, min_inliers=3, min_sep_mm=8.0):
     """Constellation alignment: the moles are their own fiducials (design doc).
 
     A 2-point RANSAC over SIMILARITY transforms: each pair of A-moles and pair
@@ -110,47 +120,47 @@ def estimate_scan_alignment_from_moles(molesA, molesB, ppmm, tol_mm=3.0, min_inl
     most moles within tol wins, refined on its inliers. Returns (T_B_to_A, n)."""
     if len(molesA) < 2 or len(molesB) < 2:
         return None, 0
-    A = np.array([[m["x"], m["y"]] for m in molesA], float)
-    B = np.array([[m["x"], m["y"]] for m in molesB], float)
-    tol = tol_mm * ppmm
-    sep = min_sep_mm * ppmm
+    points_a = np.array([[mask["x"], mask["y"]] for mask in molesA], float)
+    points_b = np.array([[mask["x"], mask["y"]] for mask in molesB], float)
+    tol = tol_mm * pixels_per_mm
+    sep = min_sep_mm * pixels_per_mm
     best_T, best_in = None, 0
-    for i1 in range(len(A)):
-        for i2 in range(len(A)):
+    for i1 in range(len(points_a)):
+        for i2 in range(len(points_a)):
             if i1 == i2:
                 continue
-            dA = np.linalg.norm(A[i1] - A[i2])
+            dA = np.linalg.norm(points_a[i1] - points_a[i2])
             if dA < sep:  # need separated anchors
                 continue
-            for j1 in range(len(B)):
-                for j2 in range(len(B)):
-                    if j1 == j2 or abs(np.linalg.norm(B[j1] - B[j2]) - dA) > tol:
+            for j1 in range(len(points_b)):
+                for j2 in range(len(points_b)):
+                    if j1 == j2 or abs(np.linalg.norm(points_b[j1] - points_b[j2]) - dA) > tol:
                         continue  # edge length must match (~scale 1)
-                    T = cv2.estimateAffinePartial2D(
-                        np.float32([B[j1], B[j2]]), np.float32([A[i1], A[i2]])
+                    transform_matrix = cv2.estimateAffinePartial2D(
+                        np.float32([points_b[j1], points_b[j2]]), np.float32([points_a[i1], points_a[i2]])
                     )[0]
-                    if T is None:
+                    if transform_matrix is None:
                         continue
-                    s = np.hypot(T[0, 0], T[0, 1])
-                    rot = abs(np.degrees(np.arctan2(T[1, 0], T[0, 0])))
-                    if not (0.9 < s < 1.1) or rot > 15:
+                    score = np.hypot(transform_matrix[0, 0], transform_matrix[0, 1])
+                    rot = abs(np.degrees(np.arctan2(transform_matrix[1, 0], transform_matrix[0, 0])))
+                    if not (0.9 < score < 1.1) or rot > 15:
                         continue  # implausible vs gantry prior
-                    Bm = (B @ T[:, :2].T) + T[:, 2]
-                    d = np.linalg.norm(Bm[:, None, :] - A[None, :, :], axis=2)
-                    inl = int((d.min(0) <= tol).sum())
+                    Bm = (points_b @ transform_matrix[:, :2].T) + transform_matrix[:, 2]
+                    distance = np.linalg.norm(Bm[:, None, :] - points_a[None, :, :], axis=2)
+                    inl = int((distance.min(0) <= tol).sum())
                     if inl > best_in:
-                        best_in, best_T = inl, T
+                        best_in, best_T = inl, transform_matrix
     if best_in < min_inliers or best_T is None:
         return None, best_in
     # refine on the full inlier set
-    Bm = (B @ best_T[:, :2].T) + best_T[:, 2]
-    d = np.linalg.norm(Bm[:, None, :] - A[None, :, :], axis=2)
-    bi = d.argmin(1)
+    Bm = (points_b @ best_T[:, :2].T) + best_T[:, 2]
+    distance = np.linalg.norm(Bm[:, None, :] - points_a[None, :, :], axis=2)
+    bi = distance.argmin(1)
     pa, pb = [], []
-    for j in range(len(B)):
-        if d[j, bi[j]] <= tol:
-            pb.append(B[j])
-            pa.append(A[bi[j]])
+    for neighbor_index in range(len(points_b)):
+        if distance[neighbor_index, bi[neighbor_index]] <= tol:
+            pb.append(points_b[neighbor_index])
+            pa.append(points_a[bi[neighbor_index]])
     if len(pa) >= 2:
         T2 = cv2.estimateAffinePartial2D(np.float32(pb), np.float32(pa))[0]
         if T2 is not None:
@@ -158,15 +168,15 @@ def estimate_scan_alignment_from_moles(molesA, molesB, ppmm, tol_mm=3.0, min_inl
     return best_T, best_in
 
 
-def count_transformed_mole_matches(molesA, molesB, T, ppmm, tol_mm):
+def count_transformed_mole_matches(molesA, molesB, transform_matrix, pixels_per_mm, tol_mm):
     """How many independently-detected moles a transform brings into agreement
     (greedy unique). This is the corroboration signal used to pick the alignment
     -- the geometrically-correct transform aligns the most moles, regardless of
     how few SIFT inliers produced it."""
-    return len(match_scan_moles_after_alignment(molesA, molesB, T, ppmm, tol_mm)[0])
+    return len(match_scan_moles_after_alignment(molesA, molesB, transform_matrix, pixels_per_mm, tol_mm)[0])
 
 
-def select_best_scan_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mole_tol_mm=3.0):
+def select_best_scan_alignment(ainfo, molesA, molesB, pixels_per_mm, max_resid_mm=3.0, mole_tol_mm=3.0):
     """Choose the B->A transform + confidence (shared by compare_scans and
     new_moles). SIFT and the mole-constellation each propose a candidate; the one
     aligning the most independently-detected moles wins (geometry beats SIFT
@@ -182,24 +192,24 @@ def select_best_scan_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mo
         and abs(ainfo["tx_mm"]) < 80
         and abs(ainfo["ty_mm"]) < 80
     )
-    Tmole, mole_inl = estimate_scan_alignment_from_moles(molesA, molesB, ppmm, tol_mm=mole_tol_mm, min_inliers=3)
+    Tmole, mole_inl = estimate_scan_alignment_from_moles(molesA, molesB, pixels_per_mm, tol_mm=mole_tol_mm, min_inliers=3)
     cands = [("gantry-only", IDENT)]
     if sift_plausible:
         cands.append(("sift", np.array(ainfo["T_B_to_A"])))
     if Tmole is not None:
         cands.append(("mole-constellation", Tmole))
     scored = sorted(
-        ((nm, Tc, count_transformed_mole_matches(molesA, molesB, Tc, ppmm, mole_tol_mm)) for nm, Tc in cands),
-        key=lambda s: -s[2],
+        ((nm, Tc, count_transformed_mole_matches(molesA, molesB, Tc, pixels_per_mm, mole_tol_mm)) for nm, Tc in cands),
+        key=lambda score: -score[2],
     )
-    mode, T, n_corrob = scored[0]
+    mode, transform_matrix, n_corrob = scored[0]
     sift_T = np.array(ainfo["T_B_to_A"]) if sift_plausible else None
     methods_agree = (
         sift_T is not None
         and Tmole is not None
-        and np.hypot(sift_T[0, 2] - Tmole[0, 2], sift_T[1, 2] - Tmole[1, 2]) / ppmm <= 5.0
-        and count_transformed_mole_matches(molesA, molesB, sift_T, ppmm, mole_tol_mm) >= 3
-        and count_transformed_mole_matches(molesA, molesB, Tmole, ppmm, mole_tol_mm) >= 3
+        and np.hypot(sift_T[0, 2] - Tmole[0, 2], sift_T[1, 2] - Tmole[1, 2]) / pixels_per_mm <= 5.0
+        and count_transformed_mole_matches(molesA, molesB, sift_T, pixels_per_mm, mole_tol_mm) >= 3
+        and count_transformed_mole_matches(molesA, molesB, Tmole, pixels_per_mm, mole_tol_mm) >= 3
     )
     sift_overwhelming = (
         sift_plausible and ainfo["inliers"] >= 50 and ainfo["inlier_spread_mm"] >= 100
@@ -215,7 +225,7 @@ def select_best_scan_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mo
     else:
         confidence = "low"
     if confidence == "low" and mode == "gantry-only":
-        T = None
+        transform_matrix = None
     # Correspondence set in the A frame (A-px positions + per-correspondence
     # residual against the CHOSEN transform T) -- feeds the M2 registration-
     # uncertainty field. Prefer SIFT inliers (dense) whenever SIFT is plausible,
@@ -223,21 +233,21 @@ def select_best_scan_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mo
     # chosen T is ~identity and the SIFT residual is ~0, giving a correctly TIGHT
     # registration uncertainty (not the flat 1mm "we don't know" fallback).
     corr = None
-    if sift_plausible and "inlier_src_B_px" in ainfo and T is not None:
+    if sift_plausible and "inlier_src_B_px" in ainfo and transform_matrix is not None:
         srcB = np.asarray(ainfo["inlier_src_B_px"], float)
         dstA = np.asarray(ainfo["inlier_dst_A_px"], float)
-        Tn = np.asarray(T)
+        Tn = np.asarray(transform_matrix)
         mapped = (srcB @ Tn[:, :2].T) + Tn[:, 2]
-        res = np.linalg.norm(dstA - mapped, axis=1) / ppmm
+        res = np.linalg.norm(dstA - mapped, axis=1) / pixels_per_mm
         corr = dict(dst_px=dstA.tolist(), resid_mm=res.tolist())
     elif mode == "mole-constellation" and Tmole is not None:
-        pr = match_scan_moles_after_alignment(molesA, molesB, Tmole, ppmm, mole_tol_mm + 1.0)[0]
-        Bxy = apply_scan_alignment_transform(Tmole, [[molesB[p["iB"]]["x"], molesB[p["iB"]]["y"]] for p in pr])
-        dst = [[molesA[p["iA"]]["x"], molesA[p["iA"]]["y"]] for p in pr]
-        res = [float(np.hypot(d[0] - b[0], d[1] - b[1]) / ppmm) for d, b in zip(dst, Bxy)]
+        pr = match_scan_moles_after_alignment(molesA, molesB, Tmole, pixels_per_mm, mole_tol_mm + 1.0)[0]
+        Bxy = apply_scan_alignment_transform(Tmole, [[molesB[point["iB"]]["x"], molesB[point["iB"]]["y"]] for point in pr])
+        dst = [[molesA[point["iA"]]["x"], molesA[point["iA"]]["y"]] for point in pr]
+        res = [float(np.hypot(distance[0] - second_value[0], distance[1] - second_value[1]) / pixels_per_mm) for distance, second_value in zip(dst, Bxy)]
         corr = dict(dst_px=dst, resid_mm=res)
     return dict(
-        T=T,
+        T=transform_matrix,
         mode=mode,
         confidence=confidence,
         n_corrob=n_corrob,
@@ -247,43 +257,43 @@ def select_best_scan_alignment(ainfo, molesA, molesB, ppmm, max_resid_mm=3.0, mo
         mole_inl=mole_inl,
         sift_plausible=sift_plausible,
         corr=corr,
-        scored=[(nm, n) for nm, _, n in scored],
+        scored=[(method_name, corroborating_mole_count) for method_name, candidate_transform, corroborating_mole_count in scored],
     )
 
 
-def apply_scan_alignment_transform(T, pts):
-    if T is None:
+def apply_scan_alignment_transform(transform_matrix, pts):
+    if transform_matrix is None:
         return np.asarray(pts, float)
-    P = np.asarray(pts, float)
-    return (P @ np.array(T)[:, :2].T) + np.array(T)[:, 2]
+    points = np.asarray(pts, float)
+    return (points @ np.array(transform_matrix)[:, :2].T) + np.array(transform_matrix)[:, 2]
 
 
-def match_scan_moles_after_alignment(molesA, molesB, T, ppmm, prior_mm):
+def match_scan_moles_after_alignment(molesA, molesB, transform_matrix, pixels_per_mm, prior_mm):
     """Match B->A (B mapped into A frame by T). Greedy NN under prior radius."""
     if not molesA or not molesB:
         return [], list(range(len(molesA))), list(range(len(molesB)))
-    A = np.array([[m["x"], m["y"]] for m in molesA], float)
-    B = apply_scan_alignment_transform(T, [[m["x"], m["y"]] for m in molesB])
-    prior_px = prior_mm * ppmm
+    points_a = np.array([[mask["x"], mask["y"]] for mask in molesA], float)
+    points_b = apply_scan_alignment_transform(transform_matrix, [[mask["x"], mask["y"]] for mask in molesB])
+    prior_px = prior_mm * pixels_per_mm
     pairs, usedA, usedB = [], set(), set()
     cost = []
-    for j in range(len(B)):
-        for i in range(len(A)):
-            d = np.linalg.norm(B[j] - A[i])
-            if d <= prior_px:
-                cost.append((d, i, j))
-    for d, i, j in sorted(cost):
-        if i in usedA or j in usedB:
+    for neighbor_index in range(len(points_b)):
+        for index in range(len(points_a)):
+            distance = np.linalg.norm(points_b[neighbor_index] - points_a[index])
+            if distance <= prior_px:
+                cost.append((distance, index, neighbor_index))
+    for distance, index, neighbor_index in sorted(cost):
+        if index in usedA or neighbor_index in usedB:
             continue
-        usedA.add(i)
-        usedB.add(j)
-        pairs.append(dict(iA=i, iB=j, resid_mm=float(d / ppmm)))
-    onlyA = [i for i in range(len(molesA)) if i not in usedA]
-    onlyB = [j for j in range(len(molesB)) if j not in usedB]
+        usedA.add(index)
+        usedB.add(neighbor_index)
+        pairs.append(dict(iA=index, iB=neighbor_index, resid_mm=float(distance / pixels_per_mm)))
+    onlyA = [index for index in range(len(molesA)) if index not in usedA]
+    onlyB = [neighbor_index for neighbor_index in range(len(molesB)) if neighbor_index not in usedB]
     return pairs, onlyA, onlyB
 
 
-def validate_mole_constellation_correspondence(molesA, molesB, pairs, ppmm, min_inliers=5):
+def validate_mole_constellation_correspondence(molesA, molesB, pairs, pixels_per_mm, min_inliers=5):
     """Independent sanity check: do matched moles agree on a rigid map?"""
     if len(pairs) < min_inliers:
         return dict(
@@ -291,14 +301,14 @@ def validate_mole_constellation_correspondence(molesA, molesB, pairs, ppmm, min_
             n=len(pairs),
             note="too few matched moles for a discriminative constellation",
         )
-    A = np.array([[molesA[p["iA"]]["x"], molesA[p["iA"]]["y"]] for p in pairs], float)
-    B = np.array([[molesB[p["iB"]]["x"], molesB[p["iB"]]["y"]] for p in pairs], float)
-    if np.linalg.matrix_rank(A - A.mean(0)) < 2:
+    points_a = np.array([[molesA[point["iA"]]["x"], molesA[point["iA"]]["y"]] for point in pairs], float)
+    points_b = np.array([[molesB[point["iB"]]["x"], molesB[point["iB"]]["y"]] for point in pairs], float)
+    if np.linalg.matrix_rank(points_a - points_a.mean(0)) < 2:
         return dict(status="uninformative", n=len(pairs), note="collinear moles")
-    T2, inl = cv2.estimateAffinePartial2D(B, A, method=cv2.RANSAC, ransacReprojThreshold=3.0 * ppmm)
-    inl = inl.ravel().astype(bool) if inl is not None else np.zeros(len(A), bool)
-    mapped = (B @ T2[:, :2].T) + T2[:, 2] if T2 is not None else B
-    resid = np.linalg.norm(mapped - A, axis=1) / ppmm
+    T2, inl = cv2.estimateAffinePartial2D(points_b, points_a, method=cv2.RANSAC, ransacReprojThreshold=3.0 * pixels_per_mm)
+    inl = inl.ravel().astype(bool) if inl is not None else np.zeros(len(points_a), bool)
+    mapped = (points_b @ T2[:, :2].T) + T2[:, 2] if T2 is not None else points_b
+    resid = np.linalg.norm(mapped - points_a, axis=1) / pixels_per_mm
     return dict(
         status="ok",
         n=int(inl.sum()),
