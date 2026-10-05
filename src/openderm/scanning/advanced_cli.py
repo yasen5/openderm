@@ -351,7 +351,7 @@ def _add_edge_options(parser: argparse.ArgumentParser) -> None:
         "--floor-model",
         default=None,
         help=(
-            "Path to a scripts/calibration/floor_depth_tare.py JSON "
+            "Path to a src/scripts/calibration/floor_depth_tare.py JSON "
             "(captures/floor_depth.json). Supplies the bed-rejection threshold; "
             "with an --rx-sweep fit inside, the threshold follows the LIVE rx "
             "tilt (evaluated at the last-read rx, clamped into the fitted range "
@@ -650,7 +650,7 @@ def _add_pivot_options(parser: argparse.ArgumentParser) -> None:
         "--rx-pivot-model",
         default=DEFAULT_RX_PIVOT_MODEL,
         help=(
-            "rx-pivot model JSON (from scripts/calibration/rx_pivot_fit.py) used to compensate "
+            "rx-pivot model JSON (from src/scripts/calibration/rx_pivot_fit.py) used to compensate "
             "RX moves and keep the viewed x/y point fixed (default %(default)s)."
         ),
     )

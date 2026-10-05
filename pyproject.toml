@@ -74,16 +74,21 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+include = ["openderm", "openderm.*", "skinmap", "skinmap.*"]
 
 [tool.setuptools.package-data]
-skinmap = ["assets/*"]
+skinmap = ["assets/*.html"]
 
 [tool.setuptools.data-files]
-"share/openderm/cad" = ["cad/collision_envelope.npz"]
-"share/openderm/pico" = ["pico/gantry_firmware.py"]
+"share/openderm/config/cad" = ["config/cad/collision_envelope.npz"]
+"share/openderm/pico" = ["src/pico/gantry_firmware.py"]
+"share/openderm/third_party/threejs" = [
+    "third_party/threejs/three.module.min.js",
+    "third_party/threejs/OrbitControls.js",
+]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["src/tests"]
 python_files = ["test_*.py"]
 
 [tool.uv]

@@ -28,8 +28,8 @@ standoff loop can still trim residual surface tilt on top).
 
 Calibrate the amplitudes from a handful of poses that all look at the *same*
 fixed point at a *constant* standoff. Collect them with
-``scripts/calibration/rx_pivot_capture.py`` and fit them with
-``scripts/calibration/rx_pivot_fit.py``. Six well-spread poses should
+``src/scripts/calibration/rx_pivot_capture.py`` and fit them with
+``src/scripts/calibration/rx_pivot_fit.py``. Six well-spread poses should
 cross-validate to less than 1 mm.
 
 Evaluating the model (``predict`` / ``pivot``) is pure-Python so it runs on the

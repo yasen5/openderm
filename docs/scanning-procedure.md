@@ -35,11 +35,13 @@ Calibrate your camera intrinsics independently using the exact camera, lens, man
 The RX pivot model used during capture must also match the current lever arm. With an inert target, record at least six same-point poses across the intended RX range, then fit the model:
 
 ```bash
-python scripts/calibration/rx_pivot_capture.py 0 --degrees
-python scripts/calibration/rx_pivot_fit.py captures/rx_pivot_poses_<timestamp>.jsonl
+python src/scripts/calibration/rx_pivot_capture.py 0.95 \
+    --record-file captures/rx_pivot_poses.jsonl
+python src/scripts/calibration/rx_pivot_fit.py captures/rx_pivot_poses.jsonl \
+    --out captures/rx_pivot_model.json
 ```
 
-The capture utility regulates Z while the arrow keys make small X/Y alignment jogs. Press Enter to record a pose and enter the next RX angle. The fit writes `captures/rx_pivot_model.json`, which is the scanner default.
+Configure the rig's connections, regulation settings, and homing policy in `config/scripts.json` before calibration. Capture angles are radians unless `rx_pivot_capture.degrees` is set to `true` in that file. The capture utility regulates Z while the arrow keys make small X/Y alignment jogs. Press Enter to record a pose and enter the next RX angle. The example explicitly writes `captures/rx_pivot_model.json`, which is the scanner default. See [calibration and collision scripts](calibration-and-collision.md) for the other utility commands.
 
 ## 3. Home and position
 

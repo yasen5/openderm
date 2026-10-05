@@ -150,7 +150,7 @@ def run(args: argparse.Namespace) -> int:
     # by the Pico and are read independently below.
     client_x = GantryServerClient(args.gantry_server_url, axis="x", timeout_s=30.0)
 
-    # Y and Z share one real-time Pico connection (pico/gantry_firmware.py).
+    # Y and Z share one real-time Pico connection (src/pico/gantry_firmware.py).
     pico_axes = {"y", "z"}
     pico_port = args.pico_port
     pico_link = None
@@ -223,7 +223,7 @@ def run(args: argparse.Namespace) -> int:
             extra = " (the contour scan probes y to find the body edges)" if axis == "y" else ""
             print(
                 f"{axis}-axis (Pico) is not homed{extra}. Re-run with --home-{axis}, or "
-                "home it first via pico/gantry_client.py.",
+                "home it first via third_party/pico/gantry_client.py.",
                 file=sys.stderr,
             )
             return 1
@@ -282,8 +282,8 @@ def run(args: argparse.Namespace) -> int:
     if not model_path.exists():
         print(
             f"rx-pivot model {model_path} not found. Capture and fit one with "
-            "scripts/calibration/rx_pivot_capture.py and "
-            "scripts/calibration/rx_pivot_fit.py.",
+            "src/scripts/calibration/rx_pivot_capture.py and "
+            "src/scripts/calibration/rx_pivot_fit.py.",
             file=sys.stderr,
         )
         return 1

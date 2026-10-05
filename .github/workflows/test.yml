@@ -38,10 +38,10 @@ jobs:
         run: uv sync --locked --extra hardware --extra vision --dev
 
       - name: Lint
-        run: uv run --no-sync ruff check --output-format=github src tests scripts pico
+        run: uv run --no-sync ruff check --output-format=github src third_party/pico
 
       - name: Compile
-        run: uv run --no-sync python -m compileall -q src tests scripts pico
+        run: uv run --no-sync python -m compileall -q src third_party/pico
 
       - name: Test
         run: uv run --no-sync pytest

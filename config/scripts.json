@@ -1,0 +1,42 @@
+{
+  "calibration": {
+    "gantry_server_url": "http://openderm-gantry.local:8090",
+    "rx_server_url": "http://127.0.0.1:8091",
+    "pico_port": "socket://openderm-gantry.local:8095",
+    "target_mm": 110.0,
+    "gain_mm_per_mm": 0.5,
+    "max_step_mm": 2.0,
+    "search_step_mm": 2.0,
+    "deadband_mm": 0.5,
+    "period_s": 0.1,
+    "samples": 5
+  },
+  "rx_pivot_capture": {
+    "degrees": false,
+    "jog_step_mm": 1.0,
+    "report_interval_s": 0.25,
+    "y_pico_vmax_mm_s": 35.0,
+    "z_pico_vmax_mm_s": 35.0,
+    "home_y": false,
+    "home_z": false
+  },
+  "floor_depth_tare": {
+    "home_z": false,
+    "settle_iters": 5,
+    "tare_samples": 10,
+    "max_travel_mm": 80.0,
+    "timeout_s": 60.0,
+    "rx_speed_rad_s": 0.1,
+    "rx_settle_tol_rad": 0.01,
+    "debug": false
+  },
+  "collision": {
+    "margin_mm": 20.0,
+    "backlash_deg": 2.5,
+    "rx_points": 9,
+    "z_points": 30,
+    "x_points": 30,
+    "y_points": 30,
+    "fine_rx_points": 89
+  }
+}

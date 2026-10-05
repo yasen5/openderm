@@ -1,0 +1,24 @@
+{
+  "description": "Affine map from real controller values to CAD/URDF joint values. q_cad = cad_scale * real_SI + cad_offset.  Linear: real in mm -> m. rx: real in rad.",
+  "base_link": "part_1_4",
+  "axes": {
+    "x":  {"cad_scale": -1.0, "cad_offset": 0.225262,  "unit": "m"},
+    "y":  {"cad_scale": -1.0, "cad_offset": 0.309830,  "unit": "m"},
+    "z":  {"cad_scale": -1.0, "cad_offset": 0.000000,  "unit": "m"},
+    "rx": {"cad_scale":  1.0, "cad_offset": -0.959931, "unit": "rad"}
+  },
+  "real_travel": {
+    "x_mm": [0, 815],
+    "y_mm": [0, 680],
+    "z_mm": [0, 406],
+    "rx_rad": [0.0, 1.92]
+  },
+  "notes": [
+    "Endpoints anchored to CAD joint limits; directions from measured real->cad correspondences.",
+    "All three linear axes are sign-flipped vs the CAD positive direction; rx is not.",
+    "Linear offsets = the CAD joint UPPER limit (real 0 anchors there, scale -1); rx offset = the CAD LOWER limit.",
+    "rx home (real 0 rad) = CAD -0.9599 rad (-55 deg tilt stop). Code moves rx to ~0.95 rad real after homing = ~level (cad ~0); home unchanged.",
+    "Re-fit these offsets after any CAD export that changes link frames or mate origins.",
+    "VALIDATION RULE: after any re-export, validate representative safe poses through the collision model before rebuilding the envelope (see docs/collision_guard.md)."
+  ]
+}
