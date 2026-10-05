@@ -64,9 +64,7 @@ def sweep(grid_path: Path, settings: CollisionConfig):
     Z = np.linspace(*travel["z_mm"], settings.z_points)
     X = np.linspace(*travel["x_mm"], settings.x_points)
     Y = np.linspace(*travel["y_mm"], settings.y_points)
-    jobs = settings.workers
-    if jobs is None:
-        jobs = max(1, min(12, (os.cpu_count() or 4) // 4))
+    jobs = max(1, min(12, (os.cpu_count() or 4) // 4))
     pairs = [(i, j, rx, z) for i, rx in enumerate(RX) for j, z in enumerate(Z)]
     C = np.empty((len(RX), len(Z), len(X), len(Y)), np.float32)
     t0 = time.time()

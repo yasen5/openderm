@@ -6,12 +6,12 @@ All utility arguments are required run-specific inputs: angles, modes, input fil
 
 Configure the file once for the rig:
 
-- `calibration`: gantry/RX URLs, shared Pico connection, standoff, Z regulation, ADC averaging, and Z feed rate. These settings apply to both capture and floor tare. Connection values in this file replace the scripts' former URL/port environment defaults; the control token still comes from `OPENDERM_CONTROL_TOKEN`.
+- `calibration`: gantry/RX URLs, shared Pico connection, standoff, Z regulation, and ADC averaging. These settings apply to both capture and floor tare. Connection values in this file replace the scripts' former URL/port environment defaults; the control token still comes from `OPENDERM_CONTROL_TOKEN`.
 - `rx_pivot_capture`: angle units (`degrees: false` means radians), initial jog size, display cadence, axis motion settings, and startup homing policy. Jog size can still be adjusted interactively with `[` and `]`.
 - `floor_depth_tare`: startup homing policy, bounded search travel/time, settling and measurement counts, RX sweep motion settings, and debugging. `max_travel_mm` limits the calibration search from its starting position; controller travel limits remain enforced independently.
-- `collision`: margin, measured RX backlash, worker count, and grid resolution. `workers: null` selects the worker count from available CPUs. Travel ranges come from `config/cad/frame_calibration.json`; keep Z resolution dense enough for the runtime guard's conservative lookup (the reference grid uses 30 points).
+- `collision`: margin, measured RX backlash, and grid resolution. Worker count is selected automatically from available CPUs. Travel ranges come from `config/cad/frame_calibration.json`; keep Z resolution dense enough for the runtime guard's conservative lookup (the reference grid uses 30 points).
 
-`null` for a motion setting delegates to the existing controller setting. The supplied homing settings are `false`, so axes must already be homed unless you change that policy. The former `--tolerance-mm` option was removed because the Pico Z adapter did not use it.
+Motion settings belong to the controllers except for the explicit capture Y/Z speeds and floor-tare RX sweep speed in this file. All script settings require concrete values. The supplied homing settings are `false`, so axes must already be homed unless you change that policy. The former `--tolerance-mm` option was removed because the Pico Z adapter did not use it.
 
 ## Hardware calibration
 

@@ -148,11 +148,7 @@ class _FloorTareWorkflow:
         self.initial_rx_rad = initial_rx_rad
 
     def _step_z(self, delta_mm: float) -> bool:
-        return self.session.move_axis_relative(
-            "z",
-            delta_mm,
-            feed_mm_min=self.args.feed_mm_min,
-        )
+        return self.session.move_axis_relative("z", delta_mm)
 
     def _read_pair(self):
         return self.session.read_pair(samples=self.args.samples)
@@ -329,7 +325,6 @@ class _FloorTareWorkflow:
             moved = self.session.move_rx_to(
                 target,
                 speed_rad_s=self.args.rx_speed_rad_s,
-                accel_rad_s2=self.args.rx_accel_rad_s2,
                 settle_tolerance_rad=self.args.rx_settle_tol_rad,
                 poll_period_s=self.args.period_s,
             )
@@ -472,13 +467,7 @@ def _connect_session(
         print(f"connecting to Pico (Z) on {args.pico_port} ...", file=sys.stderr)
         session.connect_pico_axes(
             args.pico_port,
-            {
-                "z": AxisSetup(
-                    vmax_mm_s=args.pico_vmax_mm_s,
-                    acc_mm_s2=args.pico_acc_mm_s2,
-                    home=args.home_z,
-                )
-            },
+            {"z": AxisSetup(home=args.home_z)},
             open_link=open_pico_link,
             axis_client_factory=PicoAxisClient,
             timeout_s=30.0,

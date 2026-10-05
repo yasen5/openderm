@@ -12,7 +12,7 @@ import json
 import math
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
-from typing import get_args, get_type_hints
+from typing import get_type_hints
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "scripts.json"
@@ -30,7 +30,6 @@ class CalibrationConfig:
     deadband_mm: float
     period_s: float
     samples: int
-    feed_mm_min: float | None
 
 
 @dataclass(frozen=True)
@@ -38,34 +37,26 @@ class PivotCaptureConfig:
     degrees: bool
     jog_step_mm: float
     report_interval_s: float
-    xy_feed_mm_min: float | None
-    rx_speed_rad_s: float | None
-    y_pico_vmax_mm_s: float | None
-    y_pico_acc_mm_s2: float | None
-    z_pico_vmax_mm_s: float | None
-    z_pico_acc_mm_s2: float | None
+    y_pico_vmax_mm_s: float
+    z_pico_vmax_mm_s: float
     home_y: bool
     home_z: bool
 
 
 @dataclass(frozen=True)
 class FloorTareConfig:
-    pico_vmax_mm_s: float | None
-    pico_acc_mm_s2: float | None
     home_z: bool
     settle_iters: int
     tare_samples: int
     max_travel_mm: float
     timeout_s: float
     rx_speed_rad_s: float
-    rx_accel_rad_s2: float | None
     rx_settle_tol_rad: float
     debug: bool
 
 
 @dataclass(frozen=True)
 class CollisionConfig:
-    workers: int | None
     margin_mm: float
     backlash_deg: float
     rx_points: int
@@ -96,8 +87,7 @@ def _section(document: dict, name: str):
         raise ValueError(f"{CONFIG_PATH}: {name}: unknown settings: {', '.join(sorted(unknown))}")
     for key, annotation in get_type_hints(cls).items():
         value = values[key]
-        types = get_args(annotation) or (annotation,)
-        valid = type(value) in types or (float in types and type(value) is int)
+        valid = type(value) is annotation or (annotation is float and type(value) is int)
         label = f"{CONFIG_PATH}: {name}.{key}"
         if not valid:
             raise ValueError(f"{label}: expected {annotation}, got {value!r}")

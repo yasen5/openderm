@@ -9,37 +9,28 @@
     "search_step_mm": 2.0,
     "deadband_mm": 0.5,
     "period_s": 0.1,
-    "samples": 5,
-    "feed_mm_min": null
+    "samples": 5
   },
   "rx_pivot_capture": {
     "degrees": false,
     "jog_step_mm": 1.0,
     "report_interval_s": 0.25,
-    "xy_feed_mm_min": null,
-    "rx_speed_rad_s": null,
     "y_pico_vmax_mm_s": 35.0,
-    "y_pico_acc_mm_s2": null,
     "z_pico_vmax_mm_s": 35.0,
-    "z_pico_acc_mm_s2": null,
     "home_y": false,
     "home_z": false
   },
   "floor_depth_tare": {
-    "pico_vmax_mm_s": null,
-    "pico_acc_mm_s2": null,
     "home_z": false,
     "settle_iters": 5,
     "tare_samples": 10,
     "max_travel_mm": 80.0,
     "timeout_s": 60.0,
     "rx_speed_rad_s": 0.1,
-    "rx_accel_rad_s2": null,
     "rx_settle_tol_rad": 0.01,
     "debug": false
   },
   "collision": {
-    "workers": null,
     "margin_mm": 20.0,
     "backlash_deg": 2.5,
     "rx_points": 9,

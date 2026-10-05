@@ -105,10 +105,7 @@ class _PivotCaptureWorkflow:
 
     def _goto_rx(self, radians: float) -> bool:
         self.emit(f"moving rx -> {radians:+.4f} rad ({math.degrees(radians):+.2f} deg) ...")
-        if not self.session.move_rx_to(
-            radians,
-            speed_rad_s=self.args.rx_speed_rad_s,
-        ):
+        if not self.session.move_rx_to(radians):
             return False
         landed = self.session.read_rx()
         if landed is not None:
@@ -119,7 +116,6 @@ class _PivotCaptureWorkflow:
         return self.session.move_axis_relative(
             axis,
             delta_mm,
-            feed_mm_min=(self.args.feed_mm_min if axis == "z" else self.args.xy_feed_mm_min),
             prefer_move_by=axis == "x",
         )
 
@@ -332,12 +328,10 @@ def _connect_session(args: argparse.Namespace) -> CalibrationSession | None:
             {
                 "y": AxisSetup(
                     vmax_mm_s=args.y_pico_vmax_mm_s,
-                    acc_mm_s2=args.y_pico_acc_mm_s2,
                     home=args.home_y,
                 ),
                 "z": AxisSetup(
                     vmax_mm_s=args.z_pico_vmax_mm_s,
-                    acc_mm_s2=args.z_pico_acc_mm_s2,
                     home=args.home_z,
                 ),
             },
