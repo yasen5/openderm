@@ -13,7 +13,7 @@ from numpy.typing import NDArray
 from scipy.optimize import least_squares
 from scipy.spatial.transform import Rotation
 
-from .registration_features import Frame, Pair
+from .registration_features import Frame, Pair, ratio_test_keypoint_matches
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int32]
@@ -64,9 +64,16 @@ class RigModel:
     downscale: int = 1
     base_R: RotationArray = field(default_factory=lambda: np.eye(3))  # gauge fix
     base_t: CenterArray = field(default_factory=lambda: np.zeros(3))
+    # External per-frame (R_cam2world (n,3,3), C (n,3)) indexed by Frame.idx,
+    # e.g. from a freehand SfM run. When set, the gantry kinematics below are
+    # bypassed and the rig-specific fits (lever, mount, sign) are meaningless.
+    fixed_poses: tuple[RotationArray, CenterArray] | None = None
 
     def poses(self, frames: list[Frame]) -> tuple[RotationArray, CenterArray]:
         """Nominal (R_cam2world (n,3,3), C (n,3)) for every frame."""
+        if self.fixed_poses is not None:
+            fixed_rotations, fixed_centers = self.fixed_poses
+            return fixed_rotations.copy(), fixed_centers.copy()
         frame_count = len(frames)
         camera_rotations = np.zeros((frame_count, 3, 3))
         camera_centers = np.zeros((frame_count, 3))
@@ -284,6 +291,96 @@ def predict_frame_pair_translation(
         rig_model.cy,
     )
     return (projected_image_points - sample_image_points).mean(0)
+
+
+def verify_pair_with_known_poses(
+    rig_model: RigModel,
+    frames: list[Frame],
+    camera_rotations: RotationArray,
+    camera_centers: CenterArray,
+    index: int,
+    neighbor_index: int,
+    ratio: float,
+    min_inliers: int,
+    epipolar_px: float = 3.0,
+    depth_window: tuple[float, float] = (0.4, 2.5),
+) -> Pair | None:
+    """Ratio-test matches verified against the epipolar geometry of known poses.
+
+    Unlike the similarity-RANSAC verifier this makes no narrow-FOV or
+    near-frontal assumption, so it holds for freehand views with perspective
+    change. A match is kept when its Sampson distance (downscaled px) is below
+    ``epipolar_px`` and it triangulates in front of both cameras within
+    ``depth_window`` x the source frame's depth prior. Pair.tx/ty/rot_deg/scale
+    are only meaningful for the similarity verifier and are left at 0 / 1.
+    """
+    source_frame, target_frame = frames[index], frames[neighbor_index]
+    ratio_matches = ratio_test_keypoint_matches(source_frame, target_frame, ratio)
+    if ratio_matches is None or len(ratio_matches[0]) < min_inliers:
+        return None
+    source_keypoint_indices, target_keypoint_indices = ratio_matches
+    assert source_frame.kp is not None and target_frame.kp is not None
+    source_points = np.asarray([source_frame.kp[k].pt for k in source_keypoint_indices], dtype=np.float64)
+    target_points = np.asarray([target_frame.kp[k].pt for k in target_keypoint_indices], dtype=np.float64)
+
+    source_rotation, target_rotation = camera_rotations[index], camera_rotations[neighbor_index]
+    relative_rotation = target_rotation.T @ source_rotation
+    relative_translation = target_rotation.T @ (camera_centers[index] - camera_centers[neighbor_index])
+    source_depth_prior = rig_model.depth(source_frame)
+    if np.linalg.norm(relative_translation) < 1e-3 * source_depth_prior:
+        return None  # (near) pure rotation: no epipolar constraint to verify with
+
+    source_normalized = undistort_image_points_to_normalized_camera(
+        source_points, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy
+    )
+    target_normalized = undistort_image_points_to_normalized_camera(
+        target_points, rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy
+    )
+    source_rays = np.concatenate([source_normalized, np.ones((len(source_normalized), 1))], 1)
+    target_rays = np.concatenate([target_normalized, np.ones((len(target_normalized), 1))], 1)
+
+    tx, ty, tz = relative_translation
+    skew = np.array([[0.0, -tz, ty], [tz, 0.0, -tx], [-ty, tx, 0.0]])
+    essential = skew @ relative_rotation
+    essential_source = source_rays @ essential.T  # E x1, (n,3)
+    essential_target = target_rays @ essential  # E^T x2, (n,3)
+    epipolar_residual = np.einsum("ni,ni->n", target_rays, essential_source)
+    sampson_denominator = (
+        essential_source[:, 0] ** 2 + essential_source[:, 1] ** 2
+        + essential_target[:, 0] ** 2 + essential_target[:, 1] ** 2
+    )
+    sampson_px = rig_model.fx * np.abs(epipolar_residual) / np.sqrt(np.maximum(sampson_denominator, 1e-18))
+
+    # depth of the point along the source ray from x2 x (d1 R x1 + t) = 0
+    rotated_source = source_rays @ relative_rotation.T
+    cross_target_rotated = np.cross(target_rays, rotated_source)
+    cross_target_translation = np.cross(target_rays, relative_translation[None, :])
+    source_depth = -np.einsum("ni,ni->n", cross_target_translation, cross_target_rotated) / np.maximum(
+        np.einsum("ni,ni->n", cross_target_rotated, cross_target_rotated), 1e-18
+    )
+    target_depth = rotated_source[:, 2] * source_depth + tz
+    in_front = (
+        (source_depth > depth_window[0] * source_depth_prior)
+        & (source_depth < depth_window[1] * source_depth_prior)
+        & (target_depth > 0)
+    )
+    inlier_mask = (sampson_px < epipolar_px) & in_front
+    if int(inlier_mask.sum()) < min_inliers:
+        return None
+    return Pair(
+        i=index,
+        j=neighbor_index,
+        n_good=len(source_points),
+        n_inlier=int(inlier_mask.sum()),
+        tx=0.0,
+        ty=0.0,
+        rot_deg=0.0,
+        scale=1.0,
+        src=source_points[inlier_mask].astype(np.float32),
+        dst=target_points[inlier_mask].astype(np.float32),
+        src_kp=source_keypoint_indices[inlier_mask],
+        dst_kp=target_keypoint_indices[inlier_mask],
+    )
 
 
 def find_overlapping_frame_pairs(
@@ -697,7 +794,9 @@ def bundle_adjust_camera_poses_and_feature_tracks(
     switch = max(1, min(4, args.rounds // 2))
     history = []
     for rnd in range(args.rounds):
-        if rnd == switch and getattr(args, "rig_from", None):
+        if rnd == switch and rig_model.fixed_poses is not None:
+            print("        (rig re-anchor skipped: external poses)")
+        elif rnd == switch and getattr(args, "rig_from", None):
             print("        (rig re-anchor skipped: --rig-from)")
         elif rnd == switch:
             Xs_ = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
@@ -781,7 +880,15 @@ def bundle_adjust_camera_poses_and_feature_tracks(
         rig_model,
     )
     med0 = float(np.median(err))
-    classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs)
+    # The valley re-split and its tight polish sigmas encode the gantry's
+    # ~8deg FOV and encoder accuracy; with external (e.g. SfM) poses the user's
+    # --sigma-t/--sigma-r describe the prior instead and the valley is not
+    # degenerate, so keep one polish pass at those sigmas.
+    external_poses = rig_model.fixed_poses is not None
+    polish_sigma_t = args.sigma_t if external_poses else 1.5
+    polish_sigma_r = math.radians(args.sigma_r) if external_poses else math.radians(3.0)
+    if not external_poses:
+        classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs)
     landmark_points = triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model)
     refine_all_camera_poses_from_tracks(
         frames,
@@ -795,10 +902,11 @@ def bundle_adjust_camera_poses_and_feature_tracks(
         C0,
         rig_model,
         args.sigma_px,
-        1.5,
-        math.radians(3.0),
+        polish_sigma_t,
+        polish_sigma_r,
     )
-    classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs)
+    if not external_poses:
+        classify_frames_by_capture_direction(frames, camera_rotations, camera_centers, R0, C0, Zs)
     err, camera_depths = compute_feature_track_reprojection_errors(
         triangulate_3d_feature_tracks(obs_frame[good], obs_uv[good], obs_track[good], ntracks, camera_rotations, camera_centers, rig_model),
         obs_frame[good],

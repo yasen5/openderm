@@ -19,22 +19,35 @@ from ..registration_features import (
     Frame,
     Pair,
     _KPt,
+    attach_frame_masks,
     extract_camera_frame_sift_keypoints,
     load_scan_camera_frames,
     match_camera_frame_pair_keypoints,
     configure_gpu_feature_matcher,
 )
+from ..external_poses import load_external_poses
 from ..registration_geometry import (
     RigModel,
     find_overlapping_frame_pairs,
     predict_frame_pair_translation,
     estimate_initial_rig_camera_model,
+    verify_pair_with_known_poses,
 )
 from .parser import ScanCliArguments
 
 
+def _poses_cache_token(poses_from: str | None) -> str:
+    """Pairs depend on the supplied poses, so key the cache on the file itself."""
+    if not poses_from:
+        return ""
+    stat = os.stat(poses_from)
+    return f"{os.path.abspath(poses_from)}:{stat.st_mtime_ns}:{stat.st_size}"
+
+
 class _CacheKey(TypedDict):
     version: int
+    poses: str
+    masks: str
     downscale: int
     nfeatures: int
     ratio: float
@@ -119,10 +132,16 @@ def build_scan_reconstruction_problem(
         f"{min(frame.row for frame in frames)}..{max(frame.row for frame in frames)}"
     )
 
+    mask_token = attach_frame_masks(frames, args.mask_dir) if args.mask_dir else ""
+    if args.mask_dir:
+        print(f"      masks: {len(frames)} frames restricted to {args.mask_dir}")
+
     # Features and matches are computed in the sensor frame with EXIF
     # orientation ignored.
     cache_key: _CacheKey = {
-        "version": 3,
+        "version": 5,
+        "poses": _poses_cache_token(args.poses_from),
+        "masks": mask_token,
         "downscale": args.downscale,
         "nfeatures": args.nfeatures,
         "ratio": args.ratio,
@@ -163,9 +182,15 @@ def build_scan_reconstruction_problem(
             frame.shape = (h0, w0)
     diag = math.hypot(w0, h0)
 
-    if cached is None:
-        print("[3/9] matching consecutive pairs")
+    if cached is None and args.poses_from:
+        # file order is not adjacency for freehand captures, and there is no
+        # rig to pre-fit: pairs come from pose-predicted overlap in stage 5
+        print("[3/9] consecutive/cross-row matching skipped (external poses)")
         cpairs: list[Pair] = []
+        xpairs: list[Pair] = []
+    elif cached is None:
+        print("[3/9] matching consecutive pairs")
+        cpairs = []
         for item_index in range(len(frames) - 1):
             point = match_camera_frame_pair_keypoints(frames[item_index], frames[item_index + 1], args.ratio, args.min_inliers)
             if point is None:
@@ -177,7 +202,7 @@ def build_scan_reconstruction_problem(
         # without which the rig-model pre-fit is rank-deficient (in-row pairs
         # only sample dx/dz/drx). Serpentine scan -> nearest gantry xy match.
         print("      matching cross-row pairs for the pre-fit")
-        xpairs: list[Pair] = []
+        xpairs = []
         byrow: dict[int, list[Frame]] = {}
         for frame in frames:
             byrow.setdefault(frame.row, []).append(frame)
@@ -194,7 +219,31 @@ def build_scan_reconstruction_problem(
         cpairs = cached["cpairs"]
         xpairs = cached["xpairs"]
 
-    if args.rig_from:
+    if args.poses_from:
+        external_poses = load_external_poses(args.poses_from, frames)
+        print(f"[4/9] camera poses + intrinsics loaded from {args.poses_from} (rig pre-fit skipped)")
+        full_width, full_height = external_poses.image_size
+        if abs(full_width / args.downscale - w0) > 1.0 or abs(full_height / args.downscale - h0) > 1.0:
+            raise ValueError(
+                f"{args.poses_from} was solved for {full_width}x{full_height} images but the frames are "
+                f"{w0 * args.downscale}x{h0 * args.downscale} at --downscale {args.downscale}"
+            )
+        for frame in frames:
+            frame.standoff = float(external_poses.depths[frame.idx])
+        rig_model = RigModel(
+            fx=external_poses.fx_full / args.downscale,
+            k1=external_poses.k1,
+            cx=w0 / 2.0,
+            cy=h0 / 2.0,
+            sign=1.0,
+            lever=np.zeros(3),
+            Rm=np.eye(3),
+            dz0=0.0,
+            downscale=args.downscale,
+            fixed_poses=(external_poses.rotations, external_poses.centers),
+        )
+        prefit_rms = float("nan")
+    elif args.rig_from:
         print(f"[4/9] rig model loaded from {args.rig_from} (pre-fit skipped)")
         with open(args.rig_from) as rig_file:
             rig_document = cast(_RigDocument, json.load(rig_file))
@@ -219,7 +268,7 @@ def build_scan_reconstruction_problem(
         ts: NDArray[np.float64] = np.array([[point.tx, point.ty] for point in cpairs])
         fx0 = float(np.median(np.linalg.norm(ts, axis=1)) / 10.0 * 110.0)
         rig_model, prefit_rms = estimate_initial_rig_camera_model(frames, cpairs + xpairs, w0, h0, args.downscale, fx0)
-    if args.fx_full:
+    if args.fx_full and not args.poses_from:
         rig_model.fx = args.fx_full / args.downscale
         print(
             f"      fx LOCKED to {args.fx_full:.0f} full px ({rig_model.fx:.1f} ds-px); "
@@ -252,20 +301,30 @@ def build_scan_reconstruction_problem(
         rejected = 0
         t0 = time.time()
         for n_, (index, neighbor_index) in enumerate(to_match):
-            tpred = predict_frame_pair_translation(rig_model, frames, R0, C0, index, neighbor_index)
-            point = match_camera_frame_pair_keypoints(
-                frames[index],
-                frames[neighbor_index],
-                args.ratio,
-                args.min_inliers,
-                prior_xy=tuple(tpred),
-                prior_tol=0.25 * diag,
-            )
-            if point is None:
-                continue
-            if math.hypot(point.tx - tpred[0], point.ty - tpred[1]) > 0.2 * diag:
-                rejected += 1
-                continue
+            if rig_model.fixed_poses is not None:
+                # freehand views: translation-only gating and similarity RANSAC
+                # do not hold under perspective change, so verify against the
+                # epipolar geometry of the supplied poses instead
+                point = verify_pair_with_known_poses(
+                    rig_model, frames, R0, C0, index, neighbor_index, args.ratio, args.min_inliers
+                )
+                if point is None:
+                    continue
+            else:
+                tpred = predict_frame_pair_translation(rig_model, frames, R0, C0, index, neighbor_index)
+                point = match_camera_frame_pair_keypoints(
+                    frames[index],
+                    frames[neighbor_index],
+                    args.ratio,
+                    args.min_inliers,
+                    prior_xy=tuple(tpred),
+                    prior_tol=0.25 * diag,
+                )
+                if point is None:
+                    continue
+                if math.hypot(point.tx - tpred[0], point.ty - tpred[1]) > 0.2 * diag:
+                    rejected += 1
+                    continue
             pairs.append(point)
             added += 1
             if n_ % 100 == 99:

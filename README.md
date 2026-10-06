@@ -33,6 +33,7 @@ Raspberry Pi #1 controls the X-axis via Klipper. The Raspberry Pi Pico controls 
 ### Process and compare
 
 - [Skin reconstruction and registration](docs/skin-registration.md) — reconstruction method, longitudinal comparison, uncertainty, and limitations.
+- [Simulated capture from freehand photos](docs/sim-capture.md) — build a processing-ready scan with COLMAP when the gantry is unavailable.
 
 ### Technical references
 
@@ -164,6 +165,7 @@ Processing outputs include `texture.jpg`, `surface_mesh.obj`, `viewer.html`, `pl
 
 - `src/capture/` — hardware control and capture workflows.
 - `src/processing/` — 3D registration, artifact detection, and scan comparison.
+- `src/sim_capture/` — COLMAP-based stand-in for `src/capture` that builds a scan from freehand photos.
 - `src/pico/` — MicroPython Y/Z motion firmware.
 - `src/tests/` — hardware-free unit and simulation tests.
 - `src/scripts/calibration/` — RX-pivot and floor calibration tools.

@@ -7,6 +7,7 @@ import os
 import sys
 import time
 from collections.abc import Mapping, Sequence
+from functools import lru_cache
 from types import SimpleNamespace
 from typing import Any, Protocol, TypedDict, cast
 
@@ -437,6 +438,17 @@ def prepare_texture_render_state(
     ))
 
 
+@lru_cache(maxsize=4)
+def _load_frame_mask(path: str, width: int, height: int) -> FloatArray:
+    """Mask in [0, 1] at full image resolution (``Frame.mask_path``)."""
+    mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
+    if mask is None:
+        raise RuntimeError(f"could not read mask {path}")
+    if mask.shape != (height, width):
+        mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_AREA)
+    return cast(FloatArray, mask.astype(np.float32) / 255.0)
+
+
 def compute_camera_frame_surface_projection(
     state: RenderState, frame: Frame, upsample: bool = True
 ) -> Any:
@@ -538,12 +550,22 @@ def compute_camera_frame_surface_projection(
         0,
         1,
     )
+    if frame.mask_path is not None:
+        # the masked-out part of the frame (non-skin) contributes no texture
+        frame_mask = _load_frame_mask(frame.mask_path, int(state.Wf), int(state.Hf))
+        feather = feather * cv2.remap(
+            frame_mask,
+            uv[:, 0].astype(np.float32).reshape(hd, wd),
+            uv[:, 1].astype(np.float32).reshape(hd, wd),
+            cv2.INTER_LINEAR,
+        ).ravel()
     r2c = ((uv[:, 0] - state.cxf) / state.cxf) ** 2 + ((uv[:, 1] - state.cyf) / state.cyf) ** 2
     center = np.maximum(
         np.exp(-state.blend_sharpness * 0.5 * r2c),
         0.02,
     )
-    vs = valid * state.surf.supported(descriptive_points[:, 0], descriptive_points[:, 1])
+    # float, not bool: the incidence weighting below scales it in place
+    vs = (valid & state.surf.supported(descriptive_points[:, 0], descriptive_points[:, 1])).astype(np.float64)
     if state.max_incidence_deg > 0:
         nrm = state.surf.normal(descriptive_points[:, 0], descriptive_points[:, 1], state.up_sign)
         ray = descriptive_points - state.C[frame.idx][None, :]

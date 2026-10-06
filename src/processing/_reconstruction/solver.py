@@ -327,7 +327,7 @@ def reconstruct_surface_from_camera_frames(
         args.hf_cross_group,
         args.group_feather_mm,
         args.max_incidence_deg,
-        device=args.device,
+        device="cpu" if any(frame.mask_path for frame in frames) else args.device,  # GPU geometry has no mask term
         frame_gain=frame_texture_gains,
     )
     if texture_accumulation_weights is None:

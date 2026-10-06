@@ -79,6 +79,8 @@ class ScanCliArguments(argparse.Namespace):
     deformable: bool
     deformable_reg: float
     rig_from: str | None
+    poses_from: str | None
+    mask_dir: str | None
     contour: Literal["auto", "on", "off"]
     contour_rx_thresh_deg: float
     contour_rms_thresh: float
@@ -303,6 +305,18 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "(< ~2 rows) where the pre-fit is underdetermined.",
     )
     ap.add_argument(
+        "--poses-from",
+        default=None,
+        help="use externally supplied per-frame camera poses and intrinsics "
+        "(a poses.json, e.g. from sim-capture's COLMAP run) instead of "
+        "the gantry rig model. For captures with arbitrary freehand "
+        "camera motion. Replaces the rig pre-fit and the consecutive/"
+        "cross-row matching; pairs come from pose-predicted overlap and "
+        "are verified by epipolar geometry. Pair with --reject-pose-mm 0 "
+        "--reject-rot-deg 0 and looser --sigma-t/--sigma-r; "
+        "--fx-full 0 additionally lets bundle adjustment refine fx.",
+    )
+    ap.add_argument(
         "--contour",
         choices=("auto", "on", "off"),
         default="auto",
@@ -378,5 +392,17 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "the GPU, ~10-30x faster at high --texture-ppmm), "
         "else CPU. The registration itself is unaffected.",
     )
+    ap.add_argument(
+        "--mask-dir",
+        default=None,
+        help="directory of per-frame masks <image stem>.png (255 = use, e.g. skin "
+        "from sim_capture.tools.skin_masks). Keypoints and the ortho-texture "
+        "are restricted to the masked region, so landmarks, the fitted "
+        "surface and the texture ignore the rest of the scene. Forces the "
+        "CPU texture renderer.",
+    )
     ap.add_argument("--out", default=None)
-    return cast(ScanCliArguments, ap.parse_args())
+    parsed = cast(ScanCliArguments, ap.parse_args())
+    if parsed.poses_from and parsed.rig_from:
+        ap.error("--poses-from and --rig-from are mutually exclusive")
+    return parsed

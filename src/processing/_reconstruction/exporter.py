@@ -130,6 +130,10 @@ class TexturePlacement(TypedDict):
 class PlacementsDocument(TypedDict):
     capture_dir: str
     downscale: int
+    # "gantry": poses derive from rig_model + sidecar proprioception.
+    # "external": --poses-from; rig_model.{lever_mm,Rm,rx_sign,dz0_mm} are
+    # placeholders and each frame's R_cam2world/C_mm are authoritative.
+    pose_source: str
     rig_model: RigPlacement
     ba: BundleAdjustmentPlacement
     surface: SurfacePlacement
@@ -193,6 +197,7 @@ def export_scan_reconstruction_artifacts(
     placements: PlacementsDocument = PlacementsDocument(
         capture_dir=args.capture_dir,
         downscale=args.downscale,
+        pose_source="external" if rig_model.fixed_poses is not None else "gantry",
         rig_model=RigPlacement(
             fx_ds_px=rig_model.fx,
             fx_fullres_px=rig_model.fx * args.downscale,

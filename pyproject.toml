@@ -31,6 +31,16 @@ vision = [
     "matplotlib>=3.8",
 ]
 
+# sim-capture (src/sim_capture): stand-in for src/capture when the gantry is
+# unavailable. COLMAP (via pycolmap, CPU wheel is enough) estimates poses from a
+# folder of freehand photos. Tested against pycolmap 4.2.
+sim = [
+    "pycolmap>=4",
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "opencv-python>=4.8",
+]
+
 # Offline collision-envelope generation. Runtime collision checks use NumPy
 # only and do not require the CAD/FCL stack.
 collision = [
@@ -58,6 +68,7 @@ openderm-gantry-server = "capture.motion.gantry.server:main"
 openderm-rx-axis-server = "capture.motion.rx_axis.server:main"
 openderm-pico-bridge = "capture.motion.pico.bridge:main"
 openderm-regulate = "capture.scanning.regulate:main"
+openderm-sim-capture = "sim_capture.cli:main"
 openderm-scan = "capture.scanning.cli:main"
 # Vision commands require the [vision] extra.
 openderm-process = "capture.processing:main"
@@ -75,7 +86,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["capture", "capture.*", "processing", "processing.*"]
+include = ["capture", "capture.*", "processing", "processing.*", "sim_capture", "sim_capture.*"]
 
 [tool.setuptools.package-data]
 processing = ["assets/*.html"]

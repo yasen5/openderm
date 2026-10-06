@@ -60,6 +60,7 @@ class Frame:
     kp: list[_KPt] | None = field(default=None, repr=False)
     des: FloatArray | None = field(default=None, repr=False)
     shape: tuple[int, ...] | None = None
+    mask_path: str | None = None  # 8-bit PNG, 255 = region to use (skin); None = whole frame
 
     def __init__(self, *positional_values: object, **frame_values: object) -> None:
         # ``g`` was the original capture-side field name. Accept it when
@@ -188,6 +189,27 @@ def load_scan_camera_frames(
     return frames
 
 
+def attach_frame_masks(frames: list[Frame], mask_dir: str) -> str:
+    """Point each frame at ``<mask_dir>/<image stem>.png``; returns a cache token.
+
+    Every frame needs a mask: silently running some frames unmasked would mix
+    skin-only and whole-scene landmarks in one surface fit.
+    """
+    missing: list[str] = []
+    token: list[str] = []
+    for frame in frames:
+        candidate = os.path.join(mask_dir, os.path.splitext(os.path.basename(frame.image_path))[0] + ".png")
+        if not os.path.exists(candidate):
+            missing.append(os.path.basename(candidate))
+            continue
+        stat = os.stat(candidate)
+        token.append(f"{candidate}:{stat.st_mtime_ns}:{stat.st_size}")
+        frame.mask_path = candidate
+    if missing:
+        raise SystemExit(f"--mask-dir {mask_dir}: no mask for {len(missing)} frame(s), e.g. {', '.join(missing[:3])}")
+    return "|".join(token)
+
+
 # ----------------------------------------------------------------------------
 # feature extraction + pairwise matching (CLAHE-SIFT, same recipe as 2D script)
 # ----------------------------------------------------------------------------
@@ -239,7 +261,7 @@ class _KPt:
 
 
 def _extract_camera_frame_sift_keypoints(
-    path: str, downscale: int, nfeatures: int, mem_budget: int | None = None
+    path: str, downscale: int, nfeatures: int, mem_budget: int | None = None, mask_path: str | None = None
 ) -> tuple[FloatArray, FloatArray | None, tuple[int, ...]]:
     """One frame's CLAHE-SIFT; module-level so a process pool can run it.
     Returns (pts float32 (N,2), des float32 (N,128), shape)."""
@@ -263,7 +285,14 @@ def _extract_camera_frame_sift_keypoints(
     gauge = clahe.apply(gauge)
     cv_api: Any = cv2
     sift = cv_api.SIFT_create(nfeatures=nfeatures, contrastThreshold=0.008, edgeThreshold=20)
-    kp, raw_descriptors = sift.detectAndCompute(gauge, None)
+    keypoint_mask = None
+    if mask_path is not None:
+        region = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if region is None:
+            raise RuntimeError(f"could not read mask {mask_path}")
+        region = cv2.resize(region, (gauge.shape[1], gauge.shape[0]), interpolation=cv2.INTER_NEAREST)
+        keypoint_mask = np.where(region > 127, 255, 0).astype(np.uint8)
+    kp, raw_descriptors = sift.detectAndCompute(gauge, keypoint_mask)
     pts = cast(FloatArray, np.asarray([item_index.pt for item_index in kp], dtype=np.float32))
     descriptors = cast(FloatArray | None, raw_descriptors)
     return pts, descriptors, gauge.shape
@@ -339,6 +368,7 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
                             [downscale] * len(frames),
                             [nfeatures] * len(frames),
                             [budget] * len(frames),
+                            [frame.mask_path for frame in frames],
                             chunksize=1,
                         )
                     )
@@ -352,7 +382,10 @@ def extract_camera_frame_sift_keypoints(frames: list[Frame], downscale: int, nfe
             print(f"  ! extract_camera_frame_sift_keypoints pool failed ({caught_exception}); extracting serially")
             results = None
     if results is None:
-        results = [_extract_camera_frame_sift_keypoints(frame.image_path, downscale, nfeatures) for frame in frames]
+        results = [
+            _extract_camera_frame_sift_keypoints(frame.image_path, downscale, nfeatures, mask_path=frame.mask_path)
+            for frame in frames
+        ]
     for frame, (pts, des, shape) in zip(frames, results):
         frame.gray = None  # unused downstream; skip the RAM
         frame.shape = shape
@@ -428,14 +461,12 @@ def configure_gpu_feature_matcher(mask: GpuFeatureMatcher | None) -> None:
     _GPU_MATCHER = mask
 
 
-def match_camera_frame_pair_keypoints(
-    source_frame: Frame,
-    target_frame: Frame,
-    ratio: float,
-    min_inliers: int,
-    prior_xy: tuple[float, float] | None = None,
-    prior_tol: float = 0.0,
-) -> Pair | None:
+def ratio_test_keypoint_matches(
+    source_frame: Frame, target_frame: Frame, ratio: float
+) -> tuple[NDArray[np.int32], NDArray[np.int32]] | None:
+    """Lowe ratio-test descriptor matches as (source, target) keypoint indices.
+
+    Returns None when either frame has no usable features."""
     if (
         source_frame.des is None
         or target_frame.des is None
@@ -468,6 +499,22 @@ def match_camera_frame_pair_keypoints(
         target_keypoint_indices = cast(
             NDArray[np.int32], np.asarray([match.trainIdx for match in good_matches], dtype=np.int32)
         )
+    return source_keypoint_indices, target_keypoint_indices
+
+
+def match_camera_frame_pair_keypoints(
+    source_frame: Frame,
+    target_frame: Frame,
+    ratio: float,
+    min_inliers: int,
+    prior_xy: tuple[float, float] | None = None,
+    prior_tol: float = 0.0,
+) -> Pair | None:
+    ratio_matches = ratio_test_keypoint_matches(source_frame, target_frame, ratio)
+    if ratio_matches is None:
+        return None
+    source_keypoint_indices, target_keypoint_indices = ratio_matches
+    assert source_frame.kp is not None and target_frame.kp is not None
     if len(source_keypoint_indices) < min_inliers:
         return None
     source_image_points = cast(
