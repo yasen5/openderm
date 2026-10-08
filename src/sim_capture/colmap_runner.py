@@ -7,10 +7,12 @@ mapping; this module only drives it and reads the result back as plain arrays.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal, Protocol, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 from .model import IntArray, SparseModel
 
@@ -21,6 +23,56 @@ DEFAULT_THREADS = 4  # SIFT memory scales with threads x image size; 16 threads 
 
 Matcher = Literal["auto", "exhaustive", "sequential"]
 Device = Literal["auto", "cpu"]
+
+
+class _ColmapTrack(Protocol):
+    def length(self) -> int: ...
+
+
+class _ColmapPoint3D(Protocol):
+    xyz: Sequence[float]
+    error: float
+    track: _ColmapTrack
+    color: Sequence[int]
+
+
+class _ColmapPoint2D(Protocol):
+    xy: Sequence[float]
+    point3D_id: int
+
+    def has_point3D(self) -> bool: ...
+
+
+class _ColmapImage(Protocol):
+    name: str
+    has_pose: bool
+    points2D: Sequence[_ColmapPoint2D]
+
+    def cam_from_world(self) -> _ColmapPose: ...
+
+
+class _ColmapCamera(Protocol):
+    model: object
+    params: Sequence[float]
+    width: int
+    height: int
+
+
+class _ColmapRotation(Protocol):
+    def matrix(self) -> NDArray[np.float64]: ...
+
+
+class _ColmapPose(Protocol):
+    rotation: _ColmapRotation
+    translation: Sequence[float]
+
+
+class _ColmapReconstruction(Protocol):
+    cameras: Mapping[int, _ColmapCamera]
+    images: Mapping[int, _ColmapImage]
+    points3D: Mapping[int, _ColmapPoint3D]
+
+    def compute_mean_reprojection_error(self) -> float: ...
 
 
 class ReconstructionError(RuntimeError):
@@ -92,14 +144,19 @@ def reconstruct(
     sparse_dir.mkdir(parents=True, exist_ok=True)
     mapping = pycolmap.IncrementalPipelineOptions()
     mapping.num_threads = num_threads
-    reconstructions = pycolmap.incremental_mapping(str(database), str(image_dir), str(sparse_dir), mapping)
+    # pycolmap exposes extension objects without useful static stubs; narrow
+    # its mapper result to the protocol used by the reader below.
+    reconstructions = cast(
+        Mapping[int, _ColmapReconstruction],
+        pycolmap.incremental_mapping(str(database), str(image_dir), str(sparse_dir), mapping),
+    )
     if not reconstructions:
         raise ReconstructionError(
             "COLMAP could not build any model: not enough overlapping, textured views "
             "(need >=3 images sharing a surface with ~60% overlap between neighbours)"
         )
 
-    def registered(reconstruction: Any) -> int:
+    def registered(reconstruction: _ColmapReconstruction) -> int:
         return sum(1 for image in reconstruction.images.values() if image.has_pose)
 
     best_id = max(reconstructions, key=lambda key: registered(reconstructions[key]))
@@ -108,7 +165,7 @@ def reconstruct(
     return _read_model(best, image_names, extra_sizes)
 
 
-def _read_model(reconstruction: Any, requested: list[str], extra_sizes: list[int]) -> SparseModel:
+def _read_model(reconstruction: _ColmapReconstruction, requested: list[str], extra_sizes: list[int]) -> SparseModel:
     import pycolmap
 
     cameras = list(reconstruction.cameras.values())
@@ -133,7 +190,7 @@ def _read_model(reconstruction: Any, requested: list[str], extra_sizes: list[int
     rotations = np.zeros((len(posed), 3, 3))
     translations = np.zeros((len(posed), 3))
     visible: list[IntArray] = []
-    visible_xy: list[Any] = []
+    visible_xy: list[NDArray[np.float64]] = []
     for index, image in enumerate(posed):
         pose = image.cam_from_world()
         rotations[index] = pose.rotation.matrix()

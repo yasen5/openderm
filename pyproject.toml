@@ -119,7 +119,7 @@ ignore = [
 ]
 
 [tool.pyright]
-include = ["src/processing"]
+include = ["src/capture", "src/processing", "src/sim_capture"]
 pythonVersion = "3.11"
 typeCheckingMode = "standard"
 reportMissingParameterType = "error"

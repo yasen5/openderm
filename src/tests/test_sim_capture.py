@@ -79,11 +79,11 @@ def test_canonicalize_scales_to_standoff_and_puts_cameras_on_positive_z() -> Non
 
     canonical = canonicalize(model, standoff_mm=105.0)
 
-    assert np.median(canonical.depths_mm) == pytest.approx(105.0)
+    assert np.median(canonical.surface_depths_mm) == pytest.approx(105.0)
     rotations = canonical.rotations_cam2world
     np.testing.assert_allclose(np.einsum("nij,nkj->nik", rotations, rotations), np.broadcast_to(np.eye(3), rotations.shape), atol=1e-9)
     np.testing.assert_allclose(np.linalg.det(rotations), 1.0, atol=1e-9)
-    assert (canonical.centers_mm[:, 2] > 0).all()  # +z faces the cameras
+    assert (canonical.camera_centers_mm[:, 2] > 0).all()  # +z faces the cameras
     assert canonical.warnings == []
     # every camera looks roughly down the surface normal (-z) in this capture
     assert (rotations[:, 2, 2] < -0.8).all()
@@ -98,9 +98,9 @@ def test_canonicalize_is_independent_of_colmap_gauge() -> None:
     a = canonicalize(first, 105.0)
     b = canonicalize(second, 105.0)
 
-    np.testing.assert_allclose(a.centers_mm, b.centers_mm, atol=1e-6)
+    np.testing.assert_allclose(a.camera_centers_mm, b.camera_centers_mm, atol=1e-6)
     np.testing.assert_allclose(a.rotations_cam2world, b.rotations_cam2world, atol=1e-8)
-    np.testing.assert_allclose(a.depths_mm, b.depths_mm, atol=1e-6)
+    np.testing.assert_allclose(a.surface_depths_mm, b.surface_depths_mm, atol=1e-6)
 
 
 def test_canonicalize_preserves_shape_up_to_the_standoff_scale() -> None:
@@ -110,11 +110,13 @@ def test_canonicalize_preserves_shape_up_to_the_standoff_scale() -> None:
 
     truth_centers = np.stack([camera.C for camera in cameras])
     true_distances = np.linalg.norm(truth_centers[:, None] - truth_centers[None, :], axis=-1)
-    recovered = np.linalg.norm(canonical.centers_mm[:, None] - canonical.centers_mm[None, :], axis=-1)
+    recovered = np.linalg.norm(
+        canonical.camera_centers_mm[:, None] - canonical.camera_centers_mm[None, :], axis=-1
+    )
     off_diagonal = ~np.eye(len(cameras), dtype=bool)
     ratios = recovered[off_diagonal] / true_distances[off_diagonal]
     assert np.std(ratios) < 1e-9  # a similarity: one global scale, no distortion
-    assert ratios[0] == pytest.approx(canonical.scale_mm_per_unit / 1.0)
+    assert ratios[0] == pytest.approx(canonical.scale_mm_per_colmap_unit / 1.0)
 
 
 def test_canonicalize_warns_when_the_capture_wraps_around_the_subject() -> None:
@@ -151,9 +153,9 @@ def test_exported_folder_loads_in_processing_and_poses_round_trip(tmp_path: Path
     assert [frame.station for frame in frames] == [1, 2, 3, 4, 5, 6]
     assert all(os.path.isabs(frame.image_path) and os.path.exists(frame.image_path) for frame in frames)
     poses = load_external_poses(str(out / "sim" / "poses.json"), frames)
-    np.testing.assert_allclose(poses.centers, canonical.centers_mm, atol=1e-9)
-    np.testing.assert_allclose(poses.rotations, canonical.rotations_cam2world, atol=1e-12)
-    np.testing.assert_allclose([frame.standoff for frame in frames], canonical.depths_mm)
+    np.testing.assert_allclose(poses.camera_centers_mm, canonical.camera_centers_mm, atol=1e-9)
+    np.testing.assert_allclose(poses.rotations_cam2world, canonical.rotations_cam2world, atol=1e-12)
+    np.testing.assert_allclose([frame.standoff for frame in frames], canonical.surface_depths_mm)
     assert poses.fx_full == 900.0 and poses.image_size == (64, 48)
     assert report["images_registered"] == 6 and (out / "sim" / "sparse.ply").exists()
     # nothing but sidecars matches processing's top-level *.json glob

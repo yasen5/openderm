@@ -102,9 +102,9 @@ def test_load_external_poses_aligns_by_basename_and_validates(tmp_path: Path) ->
     loaded = load_external_poses(str(poses_path), frames)
 
     assert loaded.fx_full == 900.0 and loaded.k1 == -0.02 and loaded.image_size == (640, 480)
-    np.testing.assert_allclose(loaded.centers[0], [4.0, 0.0, 100.0])  # a.jpg is file index 1
-    np.testing.assert_allclose(loaded.centers[1], [0.0, 0.0, 100.0])
-    np.testing.assert_allclose(loaded.depths, [101.0, 100.0])
+    np.testing.assert_allclose(loaded.camera_centers_mm[0], [4.0, 0.0, 100.0])  # a.jpg is file index 1
+    np.testing.assert_allclose(loaded.camera_centers_mm[1], [0.0, 0.0, 100.0])
+    np.testing.assert_allclose(loaded.surface_depths_mm, [101.0, 100.0])
 
     with pytest.raises(ValueError, match="no pose for 1 frame"):
         load_external_poses(str(poses_path), frames + [_frame(2, str(tmp_path / "missing.jpg"))])

@@ -198,13 +198,13 @@ def attach_frame_masks(frames: list[Frame], mask_dir: str) -> str:
     missing: list[str] = []
     token: list[str] = []
     for frame in frames:
-        candidate = os.path.join(mask_dir, os.path.splitext(os.path.basename(frame.image_path))[0] + ".png")
-        if not os.path.exists(candidate):
-            missing.append(os.path.basename(candidate))
+        mask_path = os.path.join(mask_dir, os.path.splitext(os.path.basename(frame.image_path))[0] + ".png")
+        if not os.path.exists(mask_path):
+            missing.append(os.path.basename(mask_path))
             continue
-        stat = os.stat(candidate)
-        token.append(f"{candidate}:{stat.st_mtime_ns}:{stat.st_size}")
-        frame.mask_path = candidate
+        stat = os.stat(mask_path)
+        token.append(f"{mask_path}:{stat.st_mtime_ns}:{stat.st_size}")
+        frame.mask_path = mask_path
     if missing:
         raise SystemExit(f"--mask-dir {mask_dir}: no mask for {len(missing)} frame(s), e.g. {', '.join(missing[:3])}")
     return "|".join(token)

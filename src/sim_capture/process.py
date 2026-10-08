@@ -36,7 +36,7 @@ def registration_command(
     downscale = 1 if quality == "full" else max(1, round(image_width / PREVIEW_TARGET_WIDTH_PX))
     full_res_px_per_mm = fx_full / standoff_mm
     texture_ppmm = min(MAX_TEXTURE_PPMM, 0.8 * full_res_px_per_mm / downscale)
-    size = standoff_mm / REFERENCE_STANDOFF_MM  # mm-valued defaults scale with the subject distance
+    standoff_scale = standoff_mm / REFERENCE_STANDOFF_MM  # mm-valued defaults scale with the subject distance
     command = [
         python,
         "-m",
@@ -61,9 +61,9 @@ def registration_command(
         "--sigma-r",
         "2",
         "--surface-pitch",
-        f"{2.0 * size:.3g}",
+        f"{2.0 * standoff_scale:.3g}",
         "--mesh-pitch",
-        f"{1.0 * size:.3g}",
+        f"{1.0 * standoff_scale:.3g}",
         "--contour",
         "on",
         "--contour-smooth",

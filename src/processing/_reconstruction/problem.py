@@ -132,7 +132,7 @@ def build_scan_reconstruction_problem(
         f"{min(frame.row for frame in frames)}..{max(frame.row for frame in frames)}"
     )
 
-    mask_token = attach_frame_masks(frames, args.mask_dir) if args.mask_dir else ""
+    mask_cache_token = attach_frame_masks(frames, args.mask_dir) if args.mask_dir else ""
     if args.mask_dir:
         print(f"      masks: {len(frames)} frames restricted to {args.mask_dir}")
 
@@ -141,7 +141,7 @@ def build_scan_reconstruction_problem(
     cache_key: _CacheKey = {
         "version": 5,
         "poses": _poses_cache_token(args.poses_from),
-        "masks": mask_token,
+        "masks": mask_cache_token,
         "downscale": args.downscale,
         "nfeatures": args.nfeatures,
         "ratio": args.ratio,
@@ -229,7 +229,7 @@ def build_scan_reconstruction_problem(
                 f"{w0 * args.downscale}x{h0 * args.downscale} at --downscale {args.downscale}"
             )
         for frame in frames:
-            frame.standoff = float(external_poses.depths[frame.idx])
+            frame.standoff = float(external_poses.surface_depths_mm[frame.idx])
         rig_model = RigModel(
             fx=external_poses.fx_full / args.downscale,
             k1=external_poses.k1,
@@ -240,7 +240,7 @@ def build_scan_reconstruction_problem(
             Rm=np.eye(3),
             dz0=0.0,
             downscale=args.downscale,
-            fixed_poses=(external_poses.rotations, external_poses.centers),
+            fixed_poses=(external_poses.rotations_cam2world, external_poses.camera_centers_mm),
         )
         prefit_rms = float("nan")
     elif args.rig_from:
@@ -292,44 +292,51 @@ def build_scan_reconstruction_problem(
             rig_model, frames, R0, C0, args.overlap_frac, args.max_partners
         )
         existing: set[tuple[int, int]] = {
-            (point.i, point.j) for point in cpairs
-        } | {(point.i, point.j) for point in xpairs}
+            (pair.i, pair.j) for pair in cpairs
+        } | {(pair.i, pair.j) for pair in xpairs}
         to_match = sorted(ij for ij in keep if ij not in existing)
         print(f"      {len(overlaps)} candidate pairs -> matching {len(to_match)} extra")
         pairs: list[Pair] = list(cpairs) + list(xpairs)
-        added = 0
-        rejected = 0
+        verified_pair_count = 0
+        prior_gate_rejection_count = 0
         t0 = time.time()
-        for n_, (index, neighbor_index) in enumerate(to_match):
+        for candidate_number, (source_frame_index, destination_frame_index) in enumerate(to_match):
             if rig_model.fixed_poses is not None:
                 # freehand views: translation-only gating and similarity RANSAC
                 # do not hold under perspective change, so verify against the
                 # epipolar geometry of the supplied poses instead
-                point = verify_pair_with_known_poses(
-                    rig_model, frames, R0, C0, index, neighbor_index, args.ratio, args.min_inliers
+                pair = verify_pair_with_known_poses(
+                    rig_model, frames, R0, C0, source_frame_index, destination_frame_index, args.ratio, args.min_inliers
                 )
-                if point is None:
+                if pair is None:
                     continue
             else:
-                tpred = predict_frame_pair_translation(rig_model, frames, R0, C0, index, neighbor_index)
-                point = match_camera_frame_pair_keypoints(
-                    frames[index],
-                    frames[neighbor_index],
+                predicted_translation = predict_frame_pair_translation(
+                    rig_model, frames, R0, C0, source_frame_index, destination_frame_index
+                )
+                pair = match_camera_frame_pair_keypoints(
+                    frames[source_frame_index],
+                    frames[destination_frame_index],
                     args.ratio,
                     args.min_inliers,
-                    prior_xy=tuple(tpred),
+                    prior_xy=tuple(predicted_translation),
                     prior_tol=0.25 * diag,
                 )
-                if point is None:
+                if pair is None:
                     continue
-                if math.hypot(point.tx - tpred[0], point.ty - tpred[1]) > 0.2 * diag:
-                    rejected += 1
+                if math.hypot(
+                    pair.tx - predicted_translation[0], pair.ty - predicted_translation[1]
+                ) > 0.2 * diag:
+                    prior_gate_rejection_count += 1
                     continue
-            pairs.append(point)
-            added += 1
-            if n_ % 100 == 99:
-                print(f"        {n_ + 1}/{len(to_match)} ({time.time() - t0:.0f}s)")
-        print(f"      added {added} ({rejected} rejected by prior gate); total {len(pairs)} pairs")
+            pairs.append(pair)
+            verified_pair_count += 1
+            if candidate_number % 100 == 99:
+                print(f"        {candidate_number + 1}/{len(to_match)} ({time.time() - t0:.0f}s)")
+        print(
+            f"      added {verified_pair_count} ({prior_gate_rejection_count} rejected by prior gate); "
+            f"total {len(pairs)} pairs"
+        )
         if not args.no_cache:
             with open(cache_path, "wb") as fh:
                 pickle.dump(

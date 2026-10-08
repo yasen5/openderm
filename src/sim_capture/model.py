@@ -6,12 +6,22 @@ Nothing here imports pycolmap, so alignment and export are testable without it.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import TypedDict
 
 import numpy as np
 from numpy.typing import NDArray
 
 FloatArray = NDArray[np.float64]
 IntArray = NDArray[np.int64]
+
+
+class AlignmentDiagnostics(TypedDict):
+    relief_ratio: float
+    max_view_angle_deg: float
+    median_view_angle_deg: float
+    cameras_below_surface: float
+    surface_extent_x_mm: float
+    surface_extent_y_mm: float
 
 
 @dataclass
@@ -47,11 +57,11 @@ class SparseModel:
 class CanonicalPoses:
     """The model in processing's gauge: millimetres, +z toward the cameras."""
 
-    scale_mm_per_unit: float
+    scale_mm_per_colmap_unit: float
     rotations_cam2world: FloatArray  # (n,3,3)
-    centers_mm: FloatArray  # (n,3)
-    depths_mm: FloatArray  # (n,) median camera-frame depth of each image's surface
+    camera_centers_mm: FloatArray  # (n,3)
+    surface_depths_mm: FloatArray  # (n,) median camera-frame depth of each image's surface
     points_mm: FloatArray  # (m,3), same row order as SparseModel.points
     surface_point_mask: NDArray[np.bool_]  # (m,) points trusted for the PCA / surface
-    diagnostics: dict[str, float]
+    diagnostics: AlignmentDiagnostics
     warnings: list[str] = field(default_factory=list)

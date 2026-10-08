@@ -106,14 +106,14 @@ def test_canonicalize_takes_scale_from_the_filtered_points_only() -> None:
         np.median((model.points[keep] @ rotation.T + translation)[:, 2])
         for rotation, translation in zip(model.rotations_cam_from_world, model.translations_cam_from_world)
     ]
-    canonical = canonicalize(model, 100.0, point_filter=keep)
-    assert canonical.scale_mm_per_unit == pytest.approx(100.0 / np.median(depths), rel=1e-6)
-    assert np.median(canonical.depths_mm) == pytest.approx(100.0, rel=1e-6)
+    canonical = canonicalize(model, 100.0, surface_point_mask=keep)
+    assert canonical.scale_mm_per_colmap_unit == pytest.approx(100.0 / np.median(depths), rel=1e-6)
+    assert np.median(canonical.surface_depths_mm) == pytest.approx(100.0, rel=1e-6)
     assert not canonical.surface_point_mask[~keep].any()
 
-    everything = canonicalize(model, 100.0, point_filter=np.ones(len(model.points), bool))
+    everything = canonicalize(model, 100.0, surface_point_mask=np.ones(len(model.points), bool))
     plain = canonicalize(model, 100.0)
-    assert everything.scale_mm_per_unit == pytest.approx(plain.scale_mm_per_unit)
+    assert everything.scale_mm_per_colmap_unit == pytest.approx(plain.scale_mm_per_colmap_unit)
 
 
 def test_canonicalize_refuses_a_mask_with_almost_no_points() -> None:
@@ -122,7 +122,7 @@ def test_canonicalize_refuses_a_mask_with_almost_no_points() -> None:
     few = np.zeros(len(model.points), bool)
     few[:5] = True
     with pytest.raises(ValueError, match="masked surface"):
-        canonicalize(model, 100.0, point_filter=few)
+        canonicalize(model, 100.0, surface_point_mask=few)
 
 
 def test_attach_frame_masks_requires_a_mask_for_every_frame(tmp_path: Path) -> None:

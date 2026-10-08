@@ -155,17 +155,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     print(f"[2/3] metric scale + canonical gauge (standoff {args.standoff_mm:g} mm)", flush=True)
-    point_filter = None
+    surface_point_mask = None
     if args.skin_masks is not None:
         try:
             check_masks(args.skin_masks, model.image_names)
-            point_filter = skin_point_filter(model, args.skin_masks)
-            print(f"      {int(point_filter.sum())}/{len(point_filter)} COLMAP points lie on the masked surface")
+            surface_point_mask = skin_point_filter(model, args.skin_masks)
+            print(
+                f"      {int(surface_point_mask.sum())}/{len(surface_point_mask)} COLMAP points lie on the masked surface"
+            )
         except MaskError as error:
             print(f"error: {error}", file=sys.stderr)
             return 2
     try:
-        canonical = canonicalize(model, args.standoff_mm, point_filter)
+        canonical = canonicalize(model, args.standoff_mm, surface_point_mask)
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -176,8 +178,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         canonical,
         args.standoff_mm,
         extra_report=None
-        if point_filter is None
-        else {"skin_masks": str(args.skin_masks), "points_on_mask": int(point_filter.sum())},
+        if surface_point_mask is None
+        else {"skin_masks": str(args.skin_masks), "points_on_mask": int(surface_point_mask.sum())},
     )
     mask_dir = None
     if args.skin_masks is not None:
@@ -187,7 +189,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"      ! {warning}", file=sys.stderr)
     print(
         f"[3/3] wrote {len(model.image_names)} frames to {args.out} "
-        f"(scale {canonical.scale_mm_per_unit:.4g} mm/unit, surface "
+        f"(scale {canonical.scale_mm_per_colmap_unit:.4g} mm/COLMAP unit, surface "
         f"{report['diagnostics']['surface_extent_x_mm']:.0f}x{report['diagnostics']['surface_extent_y_mm']:.0f} mm)"
     )
 
