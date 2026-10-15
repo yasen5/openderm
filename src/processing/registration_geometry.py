@@ -386,8 +386,9 @@ def verify_pair_with_known_poses(
 def find_overlapping_frame_pairs(
     rig_model: RigModel, frames: list[Frame], camera_rotations: RotationArray,
     camera_centers: CenterArray, overlap_frac: float, max_partners: int,
+    *, spatial: bool = False,
 ) -> tuple[set[tuple[int, int]], dict[tuple[int, int], float]]:
-    """Predict pairwise overlap by projecting footprints onto the mean plane."""
+    """Predict overlap on the mean plane, or in each camera for a free surface."""
     frame_count = len(frames)
     image_width, image_height = rig_model.cx * 2, rig_model.cy * 2
     image_corners = np.array(
@@ -405,28 +406,71 @@ def find_overlapping_frame_pairs(
         )
         quads[frame.idx] = camera_space_corners @ camera_rotations[frame.idx].T + camera_centers[frame.idx]
         centers[frame.idx] = camera_centers[frame.idx] + camera_depth_mm * camera_rotations[frame.idx][:, 2]
-    ctr = centers.mean(0)
-    left_singular_vectors, singular_values, right_singular_vectors = np.linalg.svd(centers - ctr, full_matrices=False)
-    e1, e2 = right_singular_vectors[0], right_singular_vectors[1]
-    q2 = np.stack([(quads - ctr) @ e1, (quads - ctr) @ e2], axis=-1)  # (n,4,2)
-    lo = q2.min(1)
-    hi = q2.max(1)
-    area = (hi - lo).prod(1)
-    overlaps = {}
-    for index in range(frame_count):
-        ix = np.maximum(0.0, np.minimum(hi[index, 0], hi[:, 0]) - np.maximum(lo[index, 0], lo[:, 0]))
-        iy = np.maximum(0.0, np.minimum(hi[index, 1], hi[:, 1]) - np.maximum(lo[index, 1], lo[:, 1]))
-        frac = ix * iy / np.minimum(area[index], area)
-        for neighbor_index in range(index + 1, frame_count):
-            if frac[neighbor_index] >= overlap_frac:
-                overlaps[(index, neighbor_index)] = float(frac[neighbor_index])
+    if spatial:
+        # Sample each camera's footprint at its surface depth in world space.
+        # Pair discovery must not collapse an orbit onto a single common plane.
+        u, v = np.meshgrid(np.linspace(0, 1, 5), np.linspace(0, 1, 5))
+        u, v = u.ravel()[:, None], v.ravel()[:, None]
+        samples = (
+            (1-u) * (1-v) * quads[:, 0, None] + u * (1-v) * quads[:, 1, None]
+            + u * v * quads[:, 2, None] + (1-u) * v * quads[:, 3, None]
+        )
+        overlaps: dict[tuple[int, int], float] = {}
+        for index in range(frame_count):
+            for neighbor_index in range(index + 1, frame_count):
+                if camera_rotations[index, :, 2] @ camera_rotations[neighbor_index, :, 2] <= 0:
+                    continue  # opposite-facing views do not share a visible skin patch
+                fractions: list[float] = []
+                for source, target in ((index, neighbor_index), (neighbor_index, index)):
+                    pixels, depth = project_world_points_into_camera(
+                        samples[source], camera_rotations[target], camera_centers[target],
+                        rig_model.fx, rig_model.k1, rig_model.cx, rig_model.cy,
+                    )
+                    fractions.append(float(np.mean(
+                        (depth > 0) & (pixels[:, 0] >= 0) & (pixels[:, 0] < image_width)
+                        & (pixels[:, 1] >= 0) & (pixels[:, 1] < image_height)
+                    )))
+                fraction = max(fractions)
+                if fraction >= overlap_frac:
+                    overlaps[(index, neighbor_index)] = fraction
+    else:
+        ctr = centers.mean(0)
+        left_singular_vectors, singular_values, right_singular_vectors = np.linalg.svd(centers - ctr, full_matrices=False)
+        e1, e2 = right_singular_vectors[0], right_singular_vectors[1]
+        q2 = np.stack([(quads - ctr) @ e1, (quads - ctr) @ e2], axis=-1)  # (n,4,2)
+        lo = q2.min(1)
+        hi = q2.max(1)
+        area = (hi - lo).prod(1)
+        overlaps = {}
+        for index in range(frame_count):
+            ix = np.maximum(0.0, np.minimum(hi[index, 0], hi[:, 0]) - np.maximum(lo[index, 0], lo[:, 0]))
+            iy = np.maximum(0.0, np.minimum(hi[index, 1], hi[:, 1]) - np.maximum(lo[index, 1], lo[:, 1]))
+            frac = ix * iy / np.minimum(area[index], area)
+            for neighbor_index in range(index + 1, frame_count):
+                if frac[neighbor_index] >= overlap_frac:
+                    overlaps[(index, neighbor_index)] = float(frac[neighbor_index])
     partners = {index: [] for index in range(frame_count)}
     for (index, neighbor_index), fr in overlaps.items():
         partners[index].append((fr, neighbor_index))
         partners[neighbor_index].append((fr, index))
     keep = set()
     for item_index, lst in partners.items():
-        for overlap_fraction, partner_index in sorted(lst, reverse=True)[:max_partners]:
+        if spatial:
+            # The 5x5 overlap estimate has many ties. Sorting those by frame
+            # number alone starves early views of their actual neighbours.
+            # Preserve local links in capture order, then use the remaining
+            # budget for high-overlap views (including loop closures).
+            nearby = sorted(lst, key=lambda item: abs(item[1] - item_index))[
+                :max_partners // 2
+            ]
+            nearby_indices = {partner for _, partner in nearby}
+            ranked = sorted(lst, key=lambda item: (-item[0], abs(item[1] - item_index)))
+            selected = (nearby + [item for item in ranked if item[1] not in nearby_indices])[
+                :max_partners
+            ]
+        else:
+            selected = sorted(lst, reverse=True)[:max_partners]
+        for overlap_fraction, partner_index in selected:
             keep.add((min(item_index, partner_index), max(item_index, partner_index)))
     return keep, overlaps
 

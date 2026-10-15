@@ -22,6 +22,7 @@ from processing.registration_features import (
 )
 from processing.registration_geometry import (
     RigModel,
+    find_overlapping_frame_pairs,
     project_world_points_into_camera,
     verify_pair_with_known_poses,
 )
@@ -42,6 +43,23 @@ def _frame(index: int, image_path: str = "", standoff: float = 100.0) -> Frame:
         standoff=standoff,
         settled=True,
     )
+
+
+def test_spatial_pair_budget_keeps_neighbours_when_overlap_scores_tie() -> None:
+    """A long sequence must retain local links rather than all targeting its end."""
+    count = 32
+    frames = [_frame(index) for index in range(count + 1)]
+    rotations = np.repeat(np.eye(3)[None], count + 1, axis=0)
+    rotations[-1] = np.diag([1.0, -1.0, -1.0])  # a separate, opposite-facing side
+    centers = np.zeros((count + 1, 3))
+    rig = _rig(rotations, centers)
+    pairs, overlaps = find_overlapping_frame_pairs(
+        rig, frames, rotations, centers, 0.1, 4, spatial=True
+    )
+    assert len(set(overlaps.values())) == 1
+    assert all((index, index + 1) in pairs for index in range(count - 1))
+    assert all(count not in pair for pair in pairs)
+    assert len(pairs) <= count * 4
 
 
 def _rig(rotations: np.ndarray | None = None, centers: np.ndarray | None = None) -> RigModel:

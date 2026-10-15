@@ -178,19 +178,28 @@ def export_surface_landmarks_ply(
     reprojection_error = np.clip(track_err / max(track_err.max(), 1e-6), 0, 1)
     col = np.stack([(reprojection_error * 255), (1 - reprojection_error) * 255, np.zeros_like(reprojection_error)], 1).astype(np.uint8)
     path = os.path.join(out_dir, "landmarks.ply")
+    export_colored_point_cloud_ply(path, landmark_points, col)
+
+
+def export_colored_point_cloud_ply(
+    path: str | os.PathLike[str], points_mm: FloatArray, colors_rgb: NDArray[np.uint8]
+) -> None:
+    """Write a binary RGB point cloud in millimetres (N, 3 arrays)."""
+    if points_mm.shape != colors_rgb.shape or points_mm.ndim != 2 or points_mm.shape[1] != 3:
+        raise ValueError("points and RGB colors must have matching (N, 3) shapes")
     with open(path, "wb") as fh:
         fh.write(
             (
                 f"ply\nformat binary_little_endian 1.0\n"
-                f"element vertex {len(landmark_points)}\n"
+                f"element vertex {len(points_mm)}\n"
                 "property float x\nproperty float y\nproperty float z\n"
                 "property uchar red\nproperty uchar green\nproperty uchar blue\n"
                 "end_header\n"
             ).encode()
         )
-        rec = np.zeros(len(landmark_points), dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
-        rec["xyz"] = landmark_points.astype(np.float32)
-        rec["rgb"] = col
+        rec = np.zeros(len(points_mm), dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
+        rec["xyz"] = points_mm.astype(np.float32)
+        rec["rgb"] = colors_rgb
         fh.write(rec.tobytes())
     print(f"      wrote {path}")
 

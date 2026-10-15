@@ -378,6 +378,22 @@ wheels = [
 ]
 
 [[package]]
+name = "cuda-toolkit"
+version = "12.9.2.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/51/7e/f61db087382a2114a93abc0b38f7872f86f2c7c36839da7f9403c9044b47/cuda_toolkit-12.9.2.0-py2.py3-none-any.whl", hash = "sha256:b54b8f2fd4200090b44843d48fc5411198e8b3e47a3db56e2518ab588c0ef1e0", size = 2431, upload-time = "2026-04-14T00:40:05.972Z" },
+]
+
+[package.optional-dependencies]
+cudart = [
+    { name = "nvidia-cuda-runtime-cu12", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+]
+curand = [
+    { name = "nvidia-curand-cu12", marker = "(platform_machine == 'aarch64' and sys_platform == 'linux') or (platform_machine == 'x86_64' and sys_platform == 'linux')" },
+]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1099,6 +1115,22 @@ wheels = [
 ]
 
 [[package]]
+name = "nvidia-cuda-runtime-cu12"
+version = "12.9.79"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/bc/46/a92db19b8309581092a3add7e6fceb4c301a3fd233969856a8cbf042cd3c/nvidia_cuda_runtime_cu12-12.9.79-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:25bba2dfb01d48a9b59ca474a1ac43c6ebf7011f1b0b8cc44f54eb6ac48a96c3", size = 3493179, upload-time = "2025-06-05T20:00:53.735Z" },
+]
+
+[[package]]
+name = "nvidia-curand-cu12"
+version = "10.3.10.19"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/31/44/193a0e171750ca9f8320626e8a1f2381e4077a65e69e2fb9708bd479e34a/nvidia_curand_cu12-10.3.10.19-py3-none-manylinux_2_27_x86_64.whl", hash = "sha256:49b274db4780d421bd2ccd362e1415c13887c53c214f0d4b761752b8f9f6aa1e", size = 68295626, upload-time = "2025-05-01T19:39:38.885Z" },
+]
+
+[[package]]
 name = "opencv-python"
 version = "5.0.0.93"
 source = { registry = "https://pypi.org/simple" }
@@ -1143,6 +1175,14 @@ hardware = [
     { name = "uvicorn" },
     { name = "websockets" },
 ]
+sim = [
+    { name = "numpy" },
+    { name = "opencv-python" },
+    { name = "pycolmap", marker = "platform_machine != 'x86_64' or sys_platform != 'linux'" },
+    { name = "pycolmap-cuda12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 vision = [
     { name = "matplotlib" },
     { name = "numpy" },
@@ -1168,12 +1208,17 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'vision'", specifier = ">=3.8" },
     { name = "numpy", marker = "extra == 'collision'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'hardware'", specifier = ">=1.26" },
+    { name = "numpy", marker = "extra == 'sim'", specifier = ">=1.26" },
     { name = "numpy", marker = "extra == 'vision'", specifier = ">=1.26" },
+    { name = "opencv-python", marker = "extra == 'sim'", specifier = ">=4.8" },
     { name = "opencv-python", marker = "extra == 'vision'", specifier = ">=4.8" },
+    { name = "pycolmap", marker = "(platform_machine != 'x86_64' and extra == 'sim') or (sys_platform != 'linux' and extra == 'sim')", specifier = ">=4.2,<5" },
+    { name = "pycolmap-cuda12", marker = "platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'sim'", specifier = ">=4.2,<5" },
     { name = "pydantic", marker = "extra == 'hardware'", specifier = ">=2.6" },
     { name = "pyserial", marker = "extra == 'hardware'", specifier = ">=3.5" },
     { name = "python-fcl", marker = "extra == 'collision'" },
     { name = "scipy", marker = "extra == 'collision'", specifier = ">=1.11" },
+    { name = "scipy", marker = "extra == 'sim'", specifier = ">=1.11" },
     { name = "scipy", marker = "extra == 'vision'", specifier = ">=1.11" },
     { name = "smbus2", marker = "extra == 'hardware'", specifier = ">=0.4.3" },
     { name = "trimesh", marker = "extra == 'collision'" },
@@ -1181,7 +1226,7 @@ requires-dist = [
     { name = "websockets", marker = "extra == 'hardware'", specifier = ">=12,<14" },
     { name = "yourdfpy", marker = "extra == 'collision'" },
 ]
-provides-extras = ["hardware", "vision", "collision"]
+provides-extras = ["hardware", "vision", "sim", "collision"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1307,6 +1352,43 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/5a/8d/52a5364a17eb96129962cae8d3ee7658775e085ad0ba38388684ad5944e9/pycollada-0.9.3.tar.gz", hash = "sha256:c34d6dcf0fe2eba5896f71c96d37a1c0fe1a61f08440fa0cfcec3dc2895d3302", size = 110826, upload-time = "2026-01-24T15:45:23.625Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/07/86/f1f61b7a0701f9d1299e5293d083318019f91021a4d449f94d59dbe024e4/pycollada-0.9.3-py3-none-any.whl", hash = "sha256:636e6496f60987586db82455ea7bbd9ade775e8181c6590c83b698b6cd53a9f5", size = 129206, upload-time = "2026-01-24T15:45:22.182Z" },
+]
+
+[[package]]
+name = "pycolmap"
+version = "4.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/87/0ea99959c82ad918e2f4bd4bc41b2f97d3d061a83b267a2e3b8477171e69/pycolmap-4.2.1-cp311-cp311-macosx_14_0_arm64.whl", hash = "sha256:73204e55c75ab637231d4ca559153d658ec7eda9dec39a1aacad96fbc0300cb9", size = 20715097, upload-time = "2026-09-29T17:04:22.759Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/b3/a8427abf840e4455611d7be99a47ddf1aab68f96b874ee0706c7e6d128bc/pycolmap-4.2.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:7627f0bab5746d04d94f91fec0dcb4b8ae0d5592853ab7b549cbd7dd021dd90f", size = 38173037, upload-time = "2026-09-29T17:04:25.932Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/48/ca4793173198767e8e73757797346ac71e4a42d1ec5399cdf058cf5b4e22/pycolmap-4.2.1-cp311-cp311-win_amd64.whl", hash = "sha256:9db2c0fef05cf0f9ac981a30c62a01d6bd9c67dab0fbe60a0045ff968180752e", size = 23960818, upload-time = "2026-09-29T17:04:28.727Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/1c/a3a80bb2a2b705b2e94074498fcd8a9de031f16a14fedaeb9a3628e7abb0/pycolmap-4.2.1-cp312-cp312-macosx_14_0_arm64.whl", hash = "sha256:1cacb57103909bb0adec666b06122add8ea8024682d83fc5903145e01297f243", size = 20785309, upload-time = "2026-09-29T17:04:33.333Z" },
+    { url = "https://files.pythonhosted.org/packages/a5/9a/a76e54e33730eceecb5da7eca38ad939cd6c69633339b3a53cf7299f7ea9/pycolmap-4.2.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:711cef7bd0d30326a5d75967043371c98667f24db305b8cd5cd19339d02a7073", size = 38191187, upload-time = "2026-09-29T17:04:38.813Z" },
+    { url = "https://files.pythonhosted.org/packages/80/ab/bc60b841c8be56354bfad1b4c7b1f9b15ba92e4f2285f394b3a5dbaa27c7/pycolmap-4.2.1-cp312-cp312-win_amd64.whl", hash = "sha256:b6a562b33bcbf0757c7b28c33b9166e095fa5451f9a4b38236018cf8a8d49380", size = 23973043, upload-time = "2026-09-29T17:04:42.469Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/33/37c56b31f8678e12453f82f661f587d62c7d1dd14884a75afc2026194ac4/pycolmap-4.2.1-cp313-cp313-macosx_14_0_arm64.whl", hash = "sha256:a9bcc24a5980f34293f899d5bff2c0abfe4e33d9a73c54b7d2c748c224d20659", size = 20785214, upload-time = "2026-09-29T17:04:46.01Z" },
+    { url = "https://files.pythonhosted.org/packages/93/e0/80777090908de12600f6179cde9f52e246e07fa6223a2efe1d890a2ae69a/pycolmap-4.2.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:e5cc476b6cf787b49b644b802a1790db3cb074039e903eb91197740e60f296c9", size = 38190144, upload-time = "2026-09-29T17:04:50.373Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/bb/f3c05e127281989ca7bb792a1acdbe788757d8cf2b029caad14288c001b4/pycolmap-4.2.1-cp313-cp313-win_amd64.whl", hash = "sha256:2aa586acd21154ed92c1d674d5da9b1b05e1dd9e2156627caf0ae42278423f02", size = 23974670, upload-time = "2026-09-29T17:04:54.394Z" },
+    { url = "https://files.pythonhosted.org/packages/dd/af/d4595d1551ddb15b34180205fa2b2ffa77007de15114a7354ec41bc78da7/pycolmap-4.2.1-cp314-cp314-macosx_14_0_arm64.whl", hash = "sha256:19a07d12d0e8a08f072d61161abed3898c96d618c3806c748b9e90c0f134e7bd", size = 20801481, upload-time = "2026-09-29T17:04:58.587Z" },
+    { url = "https://files.pythonhosted.org/packages/aa/98/4dfb5f6a977376fa409d557d9c8df4c44c3e6398666a1dd9586a529068cf/pycolmap-4.2.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:7fe254ce4d810d3dfc1602fcf6773fc588778e44c54dfa9886266cfecf10d8c1", size = 38201358, upload-time = "2026-09-29T17:05:04.077Z" },
+    { url = "https://files.pythonhosted.org/packages/26/ed/c6dc48fc07fdbb83e78d2a659c8f97417def4b2e922a064078aa5a2b0428/pycolmap-4.2.1-cp314-cp314-win_amd64.whl", hash = "sha256:db0f5d7f3a90869bbaf798a726a9fac5850e114a3cc317c2ae915698c52316ce", size = 24685176, upload-time = "2026-09-29T17:05:08.477Z" },
+]
+
+[[package]]
+name = "pycolmap-cuda12"
+version = "4.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cuda-toolkit", extra = ["cudart", "curand"], marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+    { name = "numpy", marker = "sys_platform != 'emscripten' and sys_platform != 'win32'" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8c/8f/315f4c158caaf32d407f20bba5147c668dd0d28859183c699356642c7b43/pycolmap_cuda12-4.2.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:babc54a7d738a0f8daaf4cb33508052acd3f40e02529dee7647a613d9e74ab78", size = 72945341, upload-time = "2026-09-29T17:05:26.411Z" },
+    { url = "https://files.pythonhosted.org/packages/98/20/3adf3bb7ba0172d0957d588e2223b4f5d17ce5e9839e51c064b074cc2381/pycolmap_cuda12-4.2.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:5d9b4ecd575481a03827586b4829fff1857dc6fd3aa63b2d60be590d84ac77dc", size = 72891756, upload-time = "2026-09-29T17:05:34.394Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/d9/eac399ee2770d1c4956693df25b9b0fbe0846b726dd4222a5f05a4e9e6ac/pycolmap_cuda12-4.2.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:b4b7006060b7f82567747dab476684388eb57a2a0a6459e403dd4507ee403a65", size = 72884427, upload-time = "2026-09-29T17:05:41.093Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/e9/54519f2ed78e0e426c4384395b59412ea8f8fa3237702b89bd2283b4cf6c/pycolmap_cuda12-4.2.1-cp314-cp314-manylinux_2_28_x86_64.whl", hash = "sha256:7d84ff940473f8276a92595ce2d8a6cd9fa5c597dc5032f369d69a76a0286176", size = 72897761, upload-time = "2026-09-29T17:05:47.886Z" },
 ]
 
 [[package]]

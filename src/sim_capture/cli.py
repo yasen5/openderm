@@ -38,7 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="approximate mean camera-to-surface distance in mm; sets the metric scale",
     )
     parser.add_argument("--matcher", choices=("auto", "exhaustive", "sequential"), default="auto")
-    parser.add_argument("--device", choices=("auto", "cpu"), default="auto", help="COLMAP/processing compute device")
+    parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto", help="COLMAP/processing compute device")
     parser.add_argument(
         "--min-registered-frac",
         type=float,

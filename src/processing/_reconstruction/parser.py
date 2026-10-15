@@ -39,8 +39,8 @@ import argparse
 from typing import Literal, cast
 
 
-class ScanCliArguments(argparse.Namespace):
-    """Typed values returned by :func:`parse_scan_cli_arguments`."""
+class CameraRegistrationArguments(argparse.Namespace):
+    """Common inputs for the heightfield and free-surface entry points."""
 
     capture_dir: str
     downscale: int
@@ -56,48 +56,49 @@ class ScanCliArguments(argparse.Namespace):
     sigma_px: float
     sigma_t: float
     sigma_r: float
-    surface_pitch: float
-    surface_smooth: float
-    mesh_pitch: float
-    texture_ppmm: float
     blend_sharpness: float
-    blend: Literal["soft", "two-band"]
-    focus_weight: float
-    hf_coherence_mm: float
-    mesh_smooth: list[float]
     max_incidence_deg: float
-    group_feather_mm: float
-    hf_cross_group: bool
     lf_gain: Literal["on", "field", "off"]
-    deformable_order: Literal[1, 2]
     limit_rows: int
     rows: str | None
     stations: str | None
     cols: str | None
-    group_by_row: bool
     group_align: Literal["none", "translation"]
-    deformable: bool
-    deformable_reg: float
     rig_from: str | None
     poses_from: str | None
     mask_dir: str | None
+    no_cache: bool
+    device: Literal["auto", "cuda", "cpu"]
+    out: str | None
+
+
+class ScanCliArguments(CameraRegistrationArguments):
+    """Typed values returned by :func:`parse_scan_cli_arguments`."""
+
+    surface_pitch: float
+    surface_smooth: float
+    mesh_pitch: float
+    texture_ppmm: float
+    blend: Literal["soft", "two-band"]
+    focus_weight: float
+    hf_coherence_mm: float
+    mesh_smooth: list[float]
+    group_feather_mm: float
+    hf_cross_group: bool
+    deformable_order: Literal[1, 2]
+    group_by_row: bool
+    deformable: bool
+    deformable_reg: float
     contour: Literal["auto", "on", "off"]
     contour_rx_thresh_deg: float
     contour_rms_thresh: float
     contour_smooth: float
     reject_pose_mm: float
     reject_rot_deg: float
-    no_cache: bool
     group_ba: Literal["group", "global"]
-    device: Literal["auto", "cuda", "cpu"]
-    out: str | None
 
-
-def parse_scan_cli_arguments() -> ScanCliArguments:
-    """Parse registration CLI arguments without running the processing pipeline."""
-    ap = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+def add_camera_registration_arguments(ap: argparse.ArgumentParser) -> None:
+    """Add shared capture loading, matching, BA, and photometry options."""
     ap.add_argument("capture_dir")
     ap.add_argument("--downscale", type=int, default=3)
     ap.add_argument("--nfeatures", type=int, default=6000)
@@ -113,8 +114,8 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         default=39237.0,
         help="full-resolution focal length in pixels from an "
         "external camera calibration (default: 39237 for the "
-        "reference camera); set to 0 only for experimental "
-        "per-run refinement",
+        "reference camera). With --poses-from the supplied focal length is used; "
+        "set to 0 only for experimental per-run refinement",
     )
     ap.add_argument(
         "--fit-k1",
@@ -135,10 +136,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
     ap.add_argument(
         "--sigma-r", type=float, default=1.5, help="pose rotation prior, deg (IS correction range)"
     )
-    ap.add_argument("--surface-pitch", type=float, default=2.0)
-    ap.add_argument("--surface-smooth", type=float, default=3.0)
-    ap.add_argument("--mesh-pitch", type=float, default=1.0)
-    ap.add_argument("--texture-ppmm", type=float, default=20.0)
     ap.add_argument(
         "--blend-sharpness",
         type=float,
@@ -146,6 +143,93 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         help="centre-weight decay; higher = closer to per-texel "
         "winner-take-all (crisper, harder seams)",
     )
+    ap.add_argument(
+        "--max-incidence-deg",
+        type=float,
+        default=0.0,
+        help="render: zero a frame's texture weight where its view "
+        "ray hits the surface more obliquely than this (ramping "
+        "from 15deg before). On a strongly curved surface a frame "
+        "can see skin through the contour at high incidence; placement "
+        "error scales with tan(incidence) so those deposits "
+        "land 10-20mm off and ghost large features. 65 is a "
+        "good reference value; 0 = off.",
+    )
+    ap.add_argument(
+        "--lf-gain",
+        choices=("on", "field", "off"),
+        default="off",
+        help="per-frame photometric gain compensation fitted from "
+        "BA track colors (estimate_camera_frame_texture_gains). The lamp travels "
+        "with the camera, so frames render the same skin up "
+        "to ~40 gray levels apart; the LF cross-fade then "
+        "shows blocky tone steps at feather/group-gate "
+        "boundaries. 'on' scales each frame's deposit by a "
+        "fitted BGR gain (geometric mean 1, so overall "
+        "exposure is kept); 'field' fits an affine gain "
+        "field per frame (also removes the within-frame "
+        "shading/vignetting gradient a scalar cannot). "
+        "off disables gain compensation.",
+    )
+    ap.add_argument("--limit-rows", type=int, default=0, help="debug: first N rows only")
+    ap.add_argument(
+        "--rows", default=None, help="debug: only rows A:B inclusive (e.g. 3:4), or a single row N"
+    )
+    ap.add_argument(
+        "--stations", default=None, help="debug: only stations A:B inclusive (e.g. 1:2)"
+    )
+    ap.add_argument("--cols", default=None, help="debug: only columns A:B inclusive (e.g. 1:3)")
+    ap.add_argument(
+        "--rig-from",
+        default=None,
+        help="load the rig model (lever/mount/sign/dz0/fx) from a "
+        "stage-one placements3d.json instead of the "
+        "self-calibrating pre-fit. Needed for tiny subsets "
+        "(< ~2 rows) where the pre-fit is underdetermined.",
+    )
+    ap.add_argument(
+        "--poses-from",
+        default=None,
+        help="use externally supplied per-frame camera poses and intrinsics "
+        "(a poses.json, e.g. from sim-capture's COLMAP run) instead of "
+        "the gantry rig model. For captures with arbitrary freehand "
+        "camera motion. Replaces the rig pre-fit and the consecutive/"
+        "cross-row matching; pairs come from pose-predicted overlap and "
+        "are verified by epipolar geometry. For ortho processing, pair with "
+        "--reject-pose-mm 0 --reject-rot-deg 0 and looser --sigma-t/--sigma-r; "
+        "--fx-full 0 additionally lets bundle adjustment refine fx.",
+    )
+    ap.add_argument("--no-cache", action="store_true")
+    ap.add_argument(
+        "--device",
+        choices=["auto", "cuda", "cpu"],
+        default="auto",
+        help="compute device. auto uses CUDA via torch when available for "
+        "feature matching and ortho-texture rendering, else CPU. "
+        "Point-cloud texture sampling always uses CPU.",
+    )
+    ap.add_argument(
+        "--mask-dir",
+        default=None,
+        help="directory of per-frame masks <image stem>.png (255 = use, e.g. skin "
+        "from sim_capture.tools.skin_masks). Keypoints and the ortho-texture "
+        "are restricted to the masked region, so landmarks, the fitted "
+        "surface and the texture ignore the rest of the scene. Forces the "
+        "CPU texture renderer.",
+    )
+    ap.add_argument("--out", default=None)
+
+
+def parse_scan_cli_arguments() -> ScanCliArguments:
+    """Parse registration CLI arguments without running the processing pipeline."""
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    add_camera_registration_arguments(ap)
+    ap.add_argument("--surface-pitch", type=float, default=2.0)
+    ap.add_argument("--surface-smooth", type=float, default=3.0)
+    ap.add_argument("--mesh-pitch", type=float, default=1.0)
+    ap.add_argument("--texture-ppmm", type=float, default=20.0)
     ap.add_argument(
         "--blend",
         choices=("soft", "two-band"),
@@ -194,18 +278,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "unaffected. 0 0 = off.",
     )
     ap.add_argument(
-        "--max-incidence-deg",
-        type=float,
-        default=0.0,
-        help="render: zero a frame's texture weight where its view "
-        "ray hits the surface more obliquely than this (ramping "
-        "from 15deg before). On a strongly curved surface a frame "
-        "can see skin through the contour at high incidence; placement "
-        "error scales with tan(incidence) so those deposits "
-        "land 10-20mm off and ghost large features. 65 is a "
-        "good reference value; 0 = off.",
-    )
-    ap.add_argument(
         "--group-feather-mm",
         type=float,
         default=0.0,
@@ -233,22 +305,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "stay per-group.",
     )
     ap.add_argument(
-        "--lf-gain",
-        choices=("on", "field", "off"),
-        default="off",
-        help="per-frame photometric gain compensation fitted from "
-        "BA track colors (estimate_camera_frame_texture_gains). The lamp travels "
-        "with the camera, so frames render the same skin up "
-        "to ~40 gray levels apart; the LF cross-fade then "
-        "shows blocky tone steps at feather/group-gate "
-        "boundaries. 'on' scales each frame's deposit by a "
-        "fitted BGR gain (geometric mean 1, so overall "
-        "exposure is kept); 'field' fits an affine gain "
-        "field per frame (also removes the within-frame "
-        "shading/vignetting gradient a scalar cannot). "
-        "off disables gain compensation.",
-    )
-    ap.add_argument(
         "--deformable-order",
         type=int,
         choices=(1, 2),
@@ -259,14 +315,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "removes the residual local breathing misalignment "
         "that cuts hairs at HF-winner seams)",
     )
-    ap.add_argument("--limit-rows", type=int, default=0, help="debug: first N rows only")
-    ap.add_argument(
-        "--rows", default=None, help="debug: only rows A:B inclusive (e.g. 3:4), or a single row N"
-    )
-    ap.add_argument(
-        "--stations", default=None, help="debug: only stations A:B inclusive (e.g. 1:2)"
-    )
-    ap.add_argument("--cols", default=None, help="debug: only columns A:B inclusive (e.g. 1:3)")
     ap.add_argument(
         "--group-by-row",
         action="store_true",
@@ -295,26 +343,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         type=float,
         default=2.0,
         help="regularisation for --deformable (higher = smaller/smoother warp)",
-    )
-    ap.add_argument(
-        "--rig-from",
-        default=None,
-        help="load the rig model (lever/mount/sign/dz0/fx) from a "
-        "stage-one placements3d.json instead of the "
-        "self-calibrating pre-fit. Needed for tiny subsets "
-        "(< ~2 rows) where the pre-fit is underdetermined.",
-    )
-    ap.add_argument(
-        "--poses-from",
-        default=None,
-        help="use externally supplied per-frame camera poses and intrinsics "
-        "(a poses.json, e.g. from sim-capture's COLMAP run) instead of "
-        "the gantry rig model. For captures with arbitrary freehand "
-        "camera motion. Replaces the rig pre-fit and the consecutive/"
-        "cross-row matching; pairs come from pose-predicted overlap and "
-        "are verified by epipolar geometry. Pair with --reject-pose-mm 0 "
-        "--reject-rot-deg 0 and looser --sigma-t/--sigma-r; "
-        "--fx-full 0 additionally lets bundle adjustment refine fx.",
     )
     ap.add_argument(
         "--contour",
@@ -369,7 +397,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "rig's rx tilt is smooth so a large rotation is an "
         "artifact). 0 disables the rotation gate.",
     )
-    ap.add_argument("--no-cache", action="store_true")
     ap.add_argument(
         "--group-ba",
         choices=["group", "global"],
@@ -383,25 +410,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
         "order scan whose full-res matching is weak: per-band "
         "chains drift and the surface/canvas blows up).",
     )
-    ap.add_argument(
-        "--device",
-        choices=["auto", "cuda", "cpu"],
-        default="auto",
-        help="texture-render compute device. auto: CUDA via torch "
-        "when available (the per-frame image pipeline runs on "
-        "the GPU, ~10-30x faster at high --texture-ppmm), "
-        "else CPU. The registration itself is unaffected.",
-    )
-    ap.add_argument(
-        "--mask-dir",
-        default=None,
-        help="directory of per-frame masks <image stem>.png (255 = use, e.g. skin "
-        "from sim_capture.tools.skin_masks). Keypoints and the ortho-texture "
-        "are restricted to the masked region, so landmarks, the fitted "
-        "surface and the texture ignore the rest of the scene. Forces the "
-        "CPU texture renderer.",
-    )
-    ap.add_argument("--out", default=None)
     parsed = cast(ScanCliArguments, ap.parse_args())
     if parsed.poses_from and parsed.rig_from:
         ap.error("--poses-from and --rig-from are mutually exclusive")

@@ -9,4 +9,7 @@ the ``openderm`` package which drives the hardware on the Pis.
 The supported workflow uses ``openderm-process`` for reconstruction and
 artifact checks and ``openderm-compare`` for longitudinal comparison. See the
 root README and ``docs/skin-registration.md`` for usage.
+
+``openderm-texture-3d`` is an alternate sim-capture entry point that retains
+local 3D geometry and exports an RGB point cloud without a heightfield unwrap.
 """

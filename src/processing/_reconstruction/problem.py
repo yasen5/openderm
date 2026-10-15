@@ -33,7 +33,7 @@ from ..registration_geometry import (
     estimate_initial_rig_camera_model,
     verify_pair_with_known_poses,
 )
-from .parser import ScanCliArguments
+from .parser import CameraRegistrationArguments
 
 
 def _poses_cache_token(poses_from: str | None) -> str:
@@ -46,6 +46,7 @@ def _poses_cache_token(poses_from: str | None) -> str:
 
 class _CacheKey(TypedDict):
     version: int
+    spatial_overlap: bool
     poses: str
     masks: str
     downscale: int
@@ -99,7 +100,7 @@ class ReconstructionProblem:
 
 
 def build_scan_reconstruction_problem(
-    args: ScanCliArguments, mem_cap: int | None = None
+    args: CameraRegistrationArguments, mem_cap: int | None = None, *, spatial_overlap: bool = False
 ) -> ReconstructionProblem:
     """Load captures, match features, and establish the rig prior."""
     out_dir = args.out or os.path.join(args.capture_dir, "registration3d")
@@ -139,7 +140,8 @@ def build_scan_reconstruction_problem(
     # Features and matches are computed in the sensor frame with EXIF
     # orientation ignored.
     cache_key: _CacheKey = {
-        "version": 5,
+        "version": 6 if spatial_overlap else 5,
+        "spatial_overlap": spatial_overlap,
         "poses": _poses_cache_token(args.poses_from),
         "masks": mask_cache_token,
         "downscale": args.downscale,
@@ -289,7 +291,8 @@ def build_scan_reconstruction_problem(
             f"top-{args.max_partners}/frame)"
         )
         keep, overlaps = find_overlapping_frame_pairs(
-            rig_model, frames, R0, C0, args.overlap_frac, args.max_partners
+            rig_model, frames, R0, C0, args.overlap_frac, args.max_partners,
+            spatial=spatial_overlap,
         )
         existing: set[tuple[int, int]] = {
             (pair.i, pair.j) for pair in cpairs

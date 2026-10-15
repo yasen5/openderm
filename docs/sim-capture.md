@@ -21,10 +21,11 @@ It does not touch `src/capture`, and nothing in `src/capture` is needed to run i
 - **One camera, one zoom.** All images must share a size and focal length. The
   focal length and radial distortion are estimated by COLMAP, not read from a
   calibration.
-- **One-sided capture.** Processing models the subject as a heightfield
+- **One-sided capture for the ortho map.** The default processing command models the subject as a heightfield
   `z = f(x, y)` seen from above. Photos should look at the same side of the
   subject with neighbouring views overlapping by about 60%. A full orbit around
-  an arm is reported as a warning and will not reconstruct well.
+  an arm is reported as a warning and will not reconstruct well with that command.
+  Use the [3D point-cloud path](#3d-texture-without-unwrapping) below for wrapping surfaces.
 - **No breathing-group handling.** The gantry path registers scan rows
   separately to cancel breathing; freehand captures are registered as one rigid
   group.
@@ -35,8 +36,19 @@ It does not touch `src/capture`, and nothing in `src/capture` is needed to run i
 python -m pip install -e ".[vision,sim]"
 ```
 
-`pycolmap` provides COLMAP. The CPU build is sufficient; COLMAP's own
-`colmap` command is not required.
+On Linux x86_64, the `sim` extra installs `pycolmap-cuda12` for NVIDIA GPU
+acceleration; other platforms install the CPU `pycolmap` package. COLMAP's own
+`colmap` command is not required. When upgrading an existing environment, uninstall
+`pycolmap` before installing the extra: the CPU and CUDA packages share the same
+Python module and must not be installed together.
+
+The default `--device auto` enables GPU feature matching when a CUDA build and
+an NVIDIA GPU are available. Use `--device cuda` to require both, or
+`--device cpu` to keep all COLMAP stages on the CPU. The runner also requests GPU
+bundle adjustment, but this requires Ceres itself to be built with CUDA/cuDSS
+support. The official PyCOLMAP 4.2.1 CUDA wheel does not include that Ceres
+support and falls back to CPU bundle adjustment. Geometric verification,
+camera registration, and triangulation still use the CPU.
 
 ## Run
 
@@ -60,6 +72,76 @@ Registration statistics, warnings and the scale factor are in
 | `mean_reprojection_error_px` | Well under 1 px for a good run. |
 | `other_models_sizes` | Non-empty means COLMAP found disconnected groups of photos. Only the largest is used. |
 | `warnings` | Captures that wrap around the subject, strongly three-dimensional subjects, or very oblique views. |
+
+## 3D texture without unwrapping
+
+For an existing COLMAP reconstruction, the minimal direct exporter skips all
+processing registration, matching, and refinement:
+
+```bash
+python -m sim_capture.texture path/to/sparse/0 path/to/original/photos \
+  --out captures/colmap-direct --masks path/to/masks --standoff-mm 500
+```
+
+Requires the `[sim]` dependencies. The model must have one `SIMPLE_RADIAL`
+camera, as produced by sim-capture. `--masks` is optional. This reads the saved
+model without changing it, triangulates each view's observed landmarks, and
+samples original photo colors onto those local 3D patches. Coordinates are
+rotated, translated, and scaled using sim-capture's alignment helper; their
+3D shape is preserved. The assumed standoff sets the otherwise unknown scale.
+Extra samples interpolate sparse geometry rather than add measured detail.
+
+The output is `texture.ply` (binary XYZ/RGB, millimetres), compatible with the
+viewer below, plus `report.json` with per-image sampled and retained point
+counts. Defaults: `--pixel-step 4`, `--voxel-mm 0.5`, `--max-edge-mm 15`,
+`--max-error-px 3`. Triangles spanning longer edges or viewed at grazing angles
+are skipped; masks also apply to sampled pixels. Duplicate voxels keep the
+first registered view's color. Reruns read the same saved geometry and only
+repeat sampling and fusion.
+
+After sim-capture finishes, use the alternate processing entry point:
+
+```bash
+openderm-texture-3d captures/arm-sim-001
+# Equivalent without reinstalling the console scripts:
+python -m processing.texture_scan_3d captures/arm-sim-001
+```
+
+This writes `texture3d/texture.ply`, a binary point cloud with RGB photo colors
+and XYZ coordinates in millimetres. Open it in a point-cloud viewer such as
+MeshLab or CloudCompare with vertex colors enabled. `texture3d/report.json`
+records the refined camera poses, intrinsics, reprojection error, and sampling
+settings. `--out DIR` selects another output directory.
+
+The command reads `sim/poses.json` and automatically uses `sim/masks/` when it
+exists. `--poses-from FILE` and `--mask-dir DIR` override those paths. It shares
+the existing frame loader, feature matching, epipolar verification, bundle
+adjustment, exposure-gain fitting, image weights, and PLY exporter. Matching
+uses camera-space overlap rather than a common plane. After bundle adjustment,
+each photograph triangulates its own observed 3D landmarks; photo samples lift
+onto those local triangles with perspective-correct interpolation. A world-space
+voxel keeps the best-weighted photo sample, preserving texture detail. There is
+no global `z = f(x,y)` fit, arc-length unwrap, or display-mesh flattening.
+
+Useful controls:
+
+| Option | Effect |
+|---|---|
+| `--point-pitch-mm 0.25` | Approximate sample spacing and fusion voxel size; increase for a smaller cloud. Density is also limited by photo resolution. |
+| `--max-edge-mm 10` | Skip triangles with longer 3D edges, leaving unsupported gaps open. Increase cautiously for sparse captures. |
+| `--max-reprojection-px 3` | Drop landmarks above this error at the feature-analysis resolution. |
+| `--downscale 2` | Reduce feature-analysis cost; photo colors still use the original images. Default is 1. |
+| `--lf-gain field` | Apply the shared exposure and shading correction. Default is off. |
+| `--max-points 5000000` | Abort above this fused-cloud budget; raise it or increase point spacing. |
+
+The geometry between landmarks is piecewise planar. Dense color samples do not
+add measured geometric detail, and sparse or poorly matched areas can have gaps
+or depth noise. Separate sides can occupy the same XY coordinates; surfaces
+closer than the voxel size may merge. This path uses CPU texture sampling and
+does not produce the 2D artifacts needed by `openderm-compare`. Existing
+`--process` behavior stays on the ortho-map path. The sim report's heightfield
+warnings describe that original path; scale and registration-quality checks
+still apply to the 3D cloud.
 
 ## Output
 
@@ -139,3 +221,41 @@ not given, processing behaves as before.
 - `placements3d.json` gains `pose_source` (`"gantry"` or `"external"`). With
   `"external"`, the rig fields `lever_mm`, `Rm`, `rx_sign` and `dz0_mm` are
   placeholders and each frame's `R_cam2world` and `C_mm` are authoritative.
+
+## View the point cloud through an SSH tunnel
+
+Start the local viewer on the workstation that holds the reconstruction:
+
+```bash
+python -m processing.view_point_cloud captures/arm-sim-001/texture3d --port 8765
+# Or after reinstalling the console scripts:
+openderm-view-3d captures/arm-sim-001/texture3d --port 8765
+```
+
+Pass either the output directory or its `texture.ply` file. The viewer binds to
+`127.0.0.1` and serves only the selected cloud and its viewer assets. Three.js
+and the orbit controls come from the repository/install; no CDN is needed.
+
+On your other machine, leave this tunnel running:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 USER@WORKSTATION
+```
+
+Open **http://localhost:8765** in that machine's browser. Drag to orbit,
+right-drag to pan, and scroll to zoom. The controls adjust point size, toggle
+photo colors and the grid, reset the view, save a PNG, or download the PLY.
+The initial page load transfers the point cloud through the tunnel; rendering
+then runs in your browser. Ctrl-C stops the foreground viewer or tunnel.
+
+The `cleaner.MOV` run is available at `captures/cleaner-texture3d/texture.ply`.
+It uses the existing 64 registered frames and skin masks in
+`captures/colmap-openderm-test/cleaner_masked`, with the original 150 mm scale
+estimate:
+
+```bash
+python -m processing.texture_scan_3d captures/colmap-openderm-test/cleaner_masked \
+  --out captures/cleaner-texture3d --point-pitch-mm 0.15 --max-edge-mm 12 \
+  --sigma-t 6 --downscale 2 --lf-gain field --device cpu
+python -m processing.view_point_cloud captures/cleaner-texture3d --port 8765
+```

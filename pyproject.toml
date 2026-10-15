@@ -32,10 +32,11 @@ vision = [
 ]
 
 # sim-capture (src/sim_capture): stand-in for src/capture when the gantry is
-# unavailable. COLMAP (via pycolmap, CPU wheel is enough) estimates poses from a
-# folder of freehand photos. Tested against pycolmap 4.2.
+# unavailable. Use CUDA-enabled COLMAP on Linux x86_64; other platforms use CPU.
+# Tested against pycolmap 4.2.
 sim = [
-    "pycolmap>=4",
+    "pycolmap-cuda12>=4.2,<5; sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "pycolmap>=4.2,<5; sys_platform != 'linux' or platform_machine != 'x86_64'",
     "numpy>=1.26",
     "scipy>=1.11",
     "opencv-python>=4.8",
@@ -69,10 +70,13 @@ openderm-rx-axis-server = "capture.motion.rx_axis.server:main"
 openderm-pico-bridge = "capture.motion.pico.bridge:main"
 openderm-regulate = "capture.scanning.regulate:main"
 openderm-sim-capture = "sim_capture.cli:main"
+openderm-colmap-texture = "sim_capture.texture:main"
 openderm-scan = "capture.scanning.cli:main"
 # Vision commands require the [vision] extra.
 openderm-process = "capture.processing:main"
 openderm-register = "processing.register_scan_3d:main"
+openderm-texture-3d = "processing.texture_scan_3d:main"
+openderm-view-3d = "processing.view_point_cloud:main"
 openderm-check-ghosts = "processing.ghost_check:main"
 openderm-check-doublings = "processing.find_doublings:main"
 openderm-compare = "processing.compare_scans:main"

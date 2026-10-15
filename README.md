@@ -161,6 +161,16 @@ openderm-compare subject-001-site-001 subject-001-site-002 --captures captures
 
 Processing outputs include `texture.jpg`, `surface_mesh.obj`, `viewer.html`, `placements3d.json`, `report.txt`, artifact-check crops, and a longitudinal change report. See [docs/skin-registration.md](docs/skin-registration.md) for the reconstruction and uncertainty model.
 
+For a saved COLMAP model, `python -m sim_capture.texture MODEL_DIR PHOTO_DIR --out OUTPUT_DIR`
+exports a photo-colored 3D cloud directly, using the saved cameras and landmarks.
+See [the direct COLMAP exporter](docs/sim-capture.md#3d-texture-without-unwrapping).
+
+For sim-capture photos of wrapping surfaces, `openderm-texture-3d captures/<scan>`
+reuses registration and exports a photo-colored 3D cloud to `texture3d/texture.ply`
+without fitting a heightfield or unwrapping. See [the 3D texture workflow](docs/sim-capture.md#3d-texture-without-unwrapping).
+Run `python -m processing.view_point_cloud captures/<scan>/texture3d` to view the
+cloud on localhost, including through an [SSH tunnel](docs/sim-capture.md#view-the-point-cloud-through-an-ssh-tunnel).
+
 ## Repository layout
 
 - `src/capture/` — hardware control and capture workflows.

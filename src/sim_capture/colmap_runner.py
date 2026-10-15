@@ -22,7 +22,7 @@ SEQUENTIAL_OVERLAP = 20
 DEFAULT_THREADS = 4  # SIFT memory scales with threads x image size; 16 threads OOMed 4K-class frames
 
 Matcher = Literal["auto", "exhaustive", "sequential"]
-Device = Literal["auto", "cpu"]
+Device = Literal["auto", "cuda", "cpu"]
 
 
 class _ColmapTrack(Protocol):
@@ -107,7 +107,14 @@ def reconstruct(
 
     pycolmap.logging.minloglevel = 0 if verbose else 3
     pycolmap.logging.logtostderr = verbose
-    colmap_device = pycolmap.Device.cpu if device == "cpu" else pycolmap.Device.auto
+    cuda_available = pycolmap.has_cuda and pycolmap.get_num_cuda_devices() > 0
+    if device == "cuda" and not cuda_available:
+        raise ReconstructionError(
+            "--device cuda requires CUDA-enabled PyCOLMAP and an available NVIDIA GPU; "
+            "install pycolmap-cuda12 instead of pycolmap on Linux x86_64 and check nvidia-smi."
+        )
+    use_gpu = device != "cpu" and cuda_available
+    colmap_device = pycolmap.Device.cuda if use_gpu else pycolmap.Device.cpu
 
     workspace.mkdir(parents=True, exist_ok=True)
     database = workspace / "database.db"
@@ -144,6 +151,9 @@ def reconstruct(
     sparse_dir.mkdir(parents=True, exist_ok=True)
     mapping = pycolmap.IncrementalPipelineOptions()
     mapping.num_threads = num_threads
+    # Ceres also needs CUDA/cuDSS support in its own build. Official CUDA wheels
+    # currently accelerate matching but fall back to CPU bundle adjustment.
+    mapping.ba_use_gpu = use_gpu
     # pycolmap exposes extension objects without useful static stubs; narrow
     # its mapper result to the protocol used by the reader below.
     reconstructions = cast(

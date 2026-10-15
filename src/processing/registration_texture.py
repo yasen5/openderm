@@ -439,7 +439,7 @@ def prepare_texture_render_state(
 
 
 @lru_cache(maxsize=4)
-def _load_frame_mask(path: str, width: int, height: int) -> FloatArray:
+def load_camera_frame_mask(path: str, width: int, height: int) -> FloatArray:
     """Mask in [0, 1] at full image resolution (``Frame.mask_path``)."""
     mask = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
     if mask is None:
@@ -447,6 +447,42 @@ def _load_frame_mask(path: str, width: int, height: int) -> FloatArray:
     if mask.shape != (height, width):
         mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_AREA)
     return cast(FloatArray, mask.astype(np.float32) / 255.0)
+
+
+def camera_frame_texture_weights(
+    uv: NDArray[np.float64], width: float, height: float, blend_sharpness: float
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Border feather and centre preference for projected sensor pixels (N, 2)."""
+    feather = np.clip(
+        np.minimum.reduce([uv[:, 0], width - 1 - uv[:, 0], uv[:, 1], height - 1 - uv[:, 1]])
+        / (0.10 * min(width, height)), 0, 1,
+    )
+    radius_squared = ((uv[:, 0] - width / 2) / (width / 2)) ** 2 + (
+        (uv[:, 1] - height / 2) / (height / 2)
+    ) ** 2
+    center = np.maximum(np.exp(-blend_sharpness * 0.5 * radius_squared), 0.02)
+    return feather, center
+
+
+def apply_camera_frame_texture_gain(
+    color: FloatArray,
+    mapx: FloatArray,
+    mapy: FloatArray,
+    width: int,
+    height: int,
+    gain: FloatArray | None,
+) -> None:
+    """Apply scalar BGR gains or an affine log-gain field to sampled colors in place."""
+    if gain is None:
+        return
+    if gain.ndim == 1:
+        color *= gain
+    else:
+        gx = mapx / width - 0.5
+        gy = mapy / height - 0.5
+        color *= np.exp(
+            gain[:, 0] + gx[..., None] * gain[:, 1] + gy[..., None] * gain[:, 2]
+        ).astype(np.float32)
 
 
 def compute_camera_frame_surface_projection(
@@ -537,33 +573,18 @@ def compute_camera_frame_surface_projection(
         return None
     uv[:, 0] = np.clip(uv[:, 0], 0, state.Wf - 1)
     uv[:, 1] = np.clip(uv[:, 1], 0, state.Hf - 1)
-    feather = np.clip(
-        np.minimum.reduce(
-            [
-                uv[:, 0],
-                state.Wf - 1 - uv[:, 0],
-                uv[:, 1],
-                state.Hf - 1 - uv[:, 1],
-            ]
-        )
-        / (0.10 * min(state.Wf, state.Hf)),
-        0,
-        1,
+    feather, center = camera_frame_texture_weights(
+        uv, state.Wf, state.Hf, state.blend_sharpness
     )
     if frame.mask_path is not None:
         # the masked-out part of the frame (non-skin) contributes no texture
-        frame_mask = _load_frame_mask(frame.mask_path, int(state.Wf), int(state.Hf))
+        frame_mask = load_camera_frame_mask(frame.mask_path, int(state.Wf), int(state.Hf))
         feather = feather * cv2.remap(
             frame_mask,
             uv[:, 0].astype(np.float32).reshape(hd, wd),
             uv[:, 1].astype(np.float32).reshape(hd, wd),
             cv2.INTER_LINEAR,
         ).ravel()
-    r2c = ((uv[:, 0] - state.cxf) / state.cxf) ** 2 + ((uv[:, 1] - state.cyf) / state.cyf) ** 2
-    center = np.maximum(
-        np.exp(-state.blend_sharpness * 0.5 * r2c),
-        0.02,
-    )
     # float, not bool: the incidence weighting below scales it in place
     vs = (valid & state.surf.supported(descriptive_points[:, 0], descriptive_points[:, 1])).astype(np.float64)
     if state.max_incidence_deg > 0:
@@ -722,16 +743,10 @@ def accumulate_camera_frame_into_cpu_texture(
         cv2.INTER_LINEAR,
         borderMode=cv2.BORDER_CONSTANT,
     ).astype(np.float32)
-    if frame_gain is not None:
-        gain = frame_gain[frame.idx]
-        if gain.ndim == 1:
-            color *= gain
-        else:
-            gx = mapx / image.shape[1] - 0.5
-            gy = mapy / image.shape[0] - 0.5
-            color *= np.exp(
-                gain[:, 0] + gx[..., None] * gain[:, 1] + gy[..., None] * gain[:, 2]
-            ).astype(np.float32)
+    apply_camera_frame_texture_gain(
+        color, mapx, mapy, image.shape[1], image.shape[0],
+        None if frame_gain is None else frame_gain[frame.idx],
+    )
     if best_group is not None and frame_group is not None and not hf_cross_group:
         weight *= best_group[v0:v1, u0:u1] == frame_group[frame.idx]
     if focus_weight > 0:
