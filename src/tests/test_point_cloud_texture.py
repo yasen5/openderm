@@ -178,3 +178,112 @@ def test_photo_pipeline_preserves_two_sides_and_colors_in_a_vertical_gauge(tmp_p
         indices = np.where(in_image & on_side)[0]
         covered[indices] |= mask[py[indices], px[indices]] > 0
     assert covered.all()
+
+    # Texture experiments reuse the exact refined geometry, without matching
+    # or BA, even when sampling settings change.
+    repeated = subprocess.run(
+        [sys.executable, "-m", "processing.texture_scan_3d", str(capture),
+         "--registration-from", str(output / "registration.npz"),
+         "--out", str(tmp_path / "repeated"), "--point-pitch-mm", "0.8",
+         "--max-edge-mm", "15", "--device", "cpu"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert repeated.returncode == 0, repeated.stdout + repeated.stderr
+    assert "matching and refinement skipped" in repeated.stdout
+    assert "extracting CLAHE-SIFT" not in repeated.stdout
+    repeated_report = json.loads((tmp_path / "repeated" / "report.json").read_text())
+    assert repeated_report["frames"][0]["C_mm"] == report["frames"][0]["C_mm"]
+    assert repeated_report["reprojection_rms_px"] == report["reprojection_rms_px"]
+
+
+def test_matchless_photos_texture_shared_surface_with_occlusion_and_masks(tmp_path: Path) -> None:
+    """Only zero-observation photos can supply color; neither can see through a sheet."""
+    from processing.registration_checkpoint import save_registration
+    from processing.registration_features import Frame
+    from processing.registration_geometry import BundleAdjustmentResult, RigModel, project_world_points_into_camera
+
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    mask_dir = capture / "sim" / "masks"
+    mask_dir.mkdir(parents=True)
+    xx, yy = np.meshgrid(np.linspace(-16, 16, 7), np.linspace(-16, 16, 7))
+    xy = np.column_stack((xx.ravel(), yy.ravel()))
+    points = np.concatenate([np.c_[xy, 8 + 0.05 * xy[:, 0]], np.c_[xy, -8 - 0.05 * xy[:, 0]]])
+    gauge = np.array([[0., 0., 1.], [0., 1., 0.], [-1., 0., 0.]])
+    points = points @ gauge.T
+    frames: list[Frame] = []
+    rotations, centers, obs_frame, obs_track, obs_uv = [], [], [], [], []
+    front_mask = np.zeros((240, 320), np.uint8)
+    front_mask[40:210, 50:180] = 255
+    front_mask[100:130, 100:140] = 0
+    for index, sign in enumerate((1, 1, -1, -1, 1, -1)):
+        name = f"v{index}.png"
+        path = capture / name
+        image = np.full((240, 320, 3), (20, 40, 220) if sign == 1 else (220, 40, 20), np.uint8)
+        # Preserve a visible pixel pattern, rather than assigning landmark colors.
+        image[:120, :, 1] = 120
+        assert cv2.imwrite(str(path), image)
+        center = np.array([0., 0., sign * 100.])
+        rotation = gauge @ look_at(center, np.array([0., 0., sign * 8.]))
+        center = gauge @ center
+        rotations.append(rotation)
+        centers.append(center)
+        mask = np.zeros((240, 320), np.uint8) if index < 4 else (
+            front_mask if sign == 1 else np.full((240, 320), 255, np.uint8))
+        mask_path = mask_dir / name
+        assert cv2.imwrite(str(mask_path), mask)
+        frames.append(Frame(idx=index, station=index + 1, row=1, col=index + 1, phase="+y",
+                            sidecar="", image_path=str(path), gauge=np.zeros(3), rx=0.,
+                            standoff=92., settled=True, mask_path=str(mask_path)))
+        (capture / f"v{index}.json").write_text(json.dumps({
+            "image": str(path), "station": index + 1, "row": 1, "col": index + 1,
+            "x_mm": 0, "y_mm": 0, "z_mm": 0, "rx_rad": 0,
+            "sensor1_mm": 92, "sensor2_mm": 92,
+        }))
+        if index < 4:
+            tracks = np.arange(0, 49) if sign == 1 else np.arange(49, 98)
+            pixels, _ = project_world_points_into_camera(points[tracks], rotation, center, 420., -0.04, 160., 120.)
+            obs_frame.extend([index] * 49)
+            obs_track.extend(tracks.tolist())
+            obs_uv.extend(pixels.tolist())
+    result = BundleAdjustmentResult(
+        X=points, track_err=np.zeros(98), obs_frame=np.asarray(obs_frame, np.int32),
+        obs_uv=np.asarray(obs_uv), obs_track=np.asarray(obs_track, np.int32), err=np.zeros(196),
+        R=np.stack(rotations), C=np.stack(centers), rms=0., history=[],
+    )
+    rig = RigModel(420., -0.04, 160., 120., 1., np.zeros(3), np.eye(3), 0.)
+    checkpoint = tmp_path / "baseline.npz"
+    save_registration(checkpoint, frames, rig, result)
+    # The original matching photos are now masked out. Photos 4/5 have known
+    # poses but not a single landmark observation, and must still supply texture.
+    output = tmp_path / "output"
+    completed = subprocess.run(
+        [sys.executable, "-m", "processing.texture_scan_3d", str(capture),
+         "--registration-from", str(checkpoint), "--out", str(output),
+         "--point-pitch-mm", "0.5", "--max-edge-mm", "12", "--device", "cpu"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads((output / "report.json").read_text())
+    assert report["contributing_frames"] == report["contributing_frames_without_matches"] == 2
+    assert all(frame["textured_points"] == 0 for frame in report["frames"][:4])
+    payload = (output / "texture.ply").read_bytes().split(b"end_header\n", 1)[1]
+    records = np.frombuffer(payload, dtype=[("xyz", "<f4", 3), ("rgb", "u1", 3)])
+    cloud, rgb = records["xyz"], records["rgb"]
+    front = cloud[:, 0] > 0
+    assert front.sum() > 200 and (~front).sum() > 1000
+    np.testing.assert_allclose(np.abs(cloud[:, 0]), 8 - 0.05 * cloud[:, 2], atol=0.001)
+    # Opposite colors cannot leak through either sheet, including where the
+    # front mask has a hole. A masked foreground never exposes the hidden back.
+    assert np.all(rgb[front, 0] == 220) and np.all(rgb[front, 2] == 20)
+    assert np.all(rgb[~front, 2] == 220) and np.all(rgb[~front, 0] == 20)
+    assert np.std(rgb[:, 1]) > 10
+    pixels, _ = project_world_points_into_camera(cloud[front].astype(float), result["R"][4], result["C"][4], 420., -0.04, 160., 120.)
+    columns, rows = np.rint(pixels).astype(int).T
+    assert np.all(front_mask[rows, columns] > 0)
+
+    # A checkpoint from a different frame selection must fail, rather than
+    # silently assigning the saved poses to the wrong photos.
+    from processing.registration_checkpoint import load_registration
+    with pytest.raises(ValueError, match="different photos"):
+        load_registration(checkpoint, frames[:-1])

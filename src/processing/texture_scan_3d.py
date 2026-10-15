@@ -1,7 +1,7 @@
 """Build a photo-colored 3D point cloud from a sim-capture folder.
 
-Reuses registration through bundle adjustment, then samples local landmark
-triangles in each photograph instead of fitting z=f(x,y) and unwrapping it.
+Reuses registration through bundle adjustment, then projects all photographs
+onto a shared 3D surface, including photos without local feature matches.
 Output: <capture_dir>/texture3d/texture.ply (RGB, millimetres) and report.json.
 """
 
@@ -18,11 +18,12 @@ from typing import TypedDict
 import numpy as np
 
 from ._reconstruction.parser import CameraRegistrationArguments, add_camera_registration_arguments
-from ._reconstruction.problem import build_scan_reconstruction_problem
+from ._reconstruction.problem import build_scan_reconstruction_problem, load_reconstruction_frames
 from .point_cloud_texture import PointCloudTextureOptions, render_point_cloud_texture
 from .registration_export import export_colored_point_cloud_ply
 from .registration_features import _apply_processing_memory_limit
 from .registration_geometry import bundle_adjust_camera_poses_and_feature_tracks
+from .registration_checkpoint import load_registration, save_registration
 from .registration_texture import estimate_camera_frame_texture_gains
 
 
@@ -37,6 +38,8 @@ class PointCloudFrameReport(TypedDict):
     image: str
     R_cam2world: list[list[float]]
     C_mm: list[float]
+    observations: int
+    textured_points: int
 
 
 class PointCloudReport(TypedDict):
@@ -46,6 +49,9 @@ class PointCloudReport(TypedDict):
     units: str
     geometry: str
     color_selection: str
+    registration_from: str
+    contributing_frames: int
+    contributing_frames_without_matches: int
     points: int
     landmarks: int
     reprojection_rms_px: float
@@ -101,7 +107,7 @@ def parse_arguments(argv: Sequence[str] | None = None) -> PointCloudCliArguments
             "this entry point takes sim-capture output; use --poses-from instead of --rig-from"
         )
     args.poses_from = args.poses_from or str(capture / "sim" / "poses.json")
-    if not Path(args.poses_from).is_file():
+    if not args.registration_from and not Path(args.poses_from).is_file():
         parser.error(f"poses file not found: {args.poses_from}")
     if args.mask_dir is None and (capture / "sim" / "masks").is_dir():
         args.mask_dir = str(capture / "sim" / "masks")
@@ -147,47 +153,66 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_arguments(argv)
     cap = _apply_processing_memory_limit()
     try:
-        problem = build_scan_reconstruction_problem(args, cap, spatial_overlap=True)
-        print("[6/9] refining 3D landmarks and camera poses")
-        result = bundle_adjust_camera_poses_and_feature_tracks(
-            problem.frames, problem.pairs, problem.rig_model, problem.R0, problem.C0, args
-        )
+        assert args.out is not None
+        output = Path(args.out)
+        output.mkdir(parents=True, exist_ok=True)
+        if args.registration_from:
+            frames, _ = load_reconstruction_frames(args)
+            rig, result = load_registration(Path(args.registration_from), frames)
+            args.downscale = rig.downscale
+            for frame in frames:
+                frame.shape = (round(2 * rig.cy), round(2 * rig.cx))
+            checkpoint = Path(args.registration_from)
+            print(f"[6/9] loaded registration from {checkpoint}; matching and refinement skipped")
+        else:
+            problem = build_scan_reconstruction_problem(args, cap, spatial_overlap=True)
+            frames, rig = problem.frames, problem.rig_model
+            print("[6/9] refining 3D landmarks and camera poses")
+            result = bundle_adjust_camera_poses_and_feature_tracks(
+                frames, problem.pairs, rig, problem.R0, problem.C0, args
+            )
+            checkpoint = output / "registration.npz"
+            save_registration(checkpoint, frames, rig, result)
         if len(result["X"]) < 3 or not np.isfinite(result["rms"]):
             raise ValueError("too few reliable 3D landmarks; check photo overlap and masks")
         gains = None
         if args.lf_gain != "off":
             gains = estimate_camera_frame_texture_gains(
-                problem.frames,
-                problem.rig_model,
+                frames,
+                rig,
                 result["obs_frame"],
                 result["obs_uv"],
                 result["obs_track"],
                 result["err"],
                 mode=args.lf_gain,
             )
-        print("[7/9] sampling photo texture on local 3D patches")
+        print("[7/9] projecting photos onto the shared 3D surface")
         cloud = render_point_cloud_texture(
-            problem.frames, problem.rig_model, result, _texture_options(args), gains
+            frames, rig, result, _texture_options(args), gains
         )
-        output = Path(problem.out_dir)
         print("[8/9] writing RGB point cloud (millimetres)")
         export_colored_point_cloud_ply(output / "texture.ply", cloud.points_mm, cloud.colors_rgb)
         assert args.poses_from is not None
+        observations = np.bincount(result["obs_frame"], minlength=len(frames))
+        contributions = np.bincount(cloud.frame_indices, minlength=len(frames))
         report: PointCloudReport = {
             "capture_dir": str(Path(args.capture_dir).resolve()),
             "poses_from": str(Path(args.poses_from).resolve()),
             "mask_dir": args.mask_dir,
             "units": "mm",
-            "geometry": "per-view piecewise-planar landmark triangles",
+            "geometry": "shared landmark triangle surface; nearest visible ray intersection",
             "color_selection": "best border/centre/incidence weight per 3D voxel",
+            "registration_from": str(checkpoint.resolve()),
+            "contributing_frames": int(np.count_nonzero(contributions)),
+            "contributing_frames_without_matches": int(np.count_nonzero((contributions > 0) & (observations == 0))),
             "points": len(cloud.points_mm),
             "landmarks": len(result["X"]),
             "reprojection_rms_px": result["rms"],
-            "fx_full_px": problem.rig_model.fx * args.downscale,
-            "k1": problem.rig_model.k1,
+            "fx_full_px": rig.fx * rig.downscale,
+            "k1": rig.k1,
             "image_size": [
-                round(2 * problem.rig_model.cx * args.downscale),
-                round(2 * problem.rig_model.cy * args.downscale),
+                round(2 * rig.cx * rig.downscale),
+                round(2 * rig.cy * rig.downscale),
             ],
             "downscale": args.downscale,
             "point_pitch_mm": args.point_pitch_mm,
@@ -199,8 +224,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "image": Path(frame.image_path).name,
                     "R_cam2world": result["R"][frame.idx].tolist(),
                     "C_mm": result["C"][frame.idx].tolist(),
+                    "observations": int(observations[frame.idx]),
+                    "textured_points": int(contributions[frame.idx]),
                 }
-                for frame in problem.frames
+                for frame in frames
             ],
         }
         (output / "report.json").write_text(json.dumps(report, indent=2, allow_nan=False) + "\n")

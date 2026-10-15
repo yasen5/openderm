@@ -28,6 +28,7 @@ Outputs (under <capture_dir>/registration3d/):
   overview.png                      static matplotlib 3D overview
   placements3d.json                 per-frame camera poses + rig model
   report.txt                        accuracy stats + capture improvement notes
+  registration.npz                  reusable refined registration (skip matching/BA)
 
 Run from an environment installed with the `vision` extra:
   openderm-register captures/<scan>
@@ -70,6 +71,7 @@ class CameraRegistrationArguments(argparse.Namespace):
     no_cache: bool
     device: Literal["auto", "cuda", "cpu"]
     out: str | None
+    registration_from: str | None
 
 
 class ScanCliArguments(CameraRegistrationArguments):
@@ -100,6 +102,10 @@ class ScanCliArguments(CameraRegistrationArguments):
 def add_camera_registration_arguments(ap: argparse.ArgumentParser) -> None:
     """Add shared capture loading, matching, BA, and photometry options."""
     ap.add_argument("capture_dir")
+    ap.add_argument(
+        "--registration-from",
+        help="reuse registration.npz; skip feature extraction, matching and pose refinement",
+    )
     ap.add_argument("--downscale", type=int, default=3)
     ap.add_argument("--nfeatures", type=int, default=6000)
     ap.add_argument("--ratio", type=float, default=0.8)
@@ -413,4 +419,6 @@ def parse_scan_cli_arguments() -> ScanCliArguments:
     parsed = cast(ScanCliArguments, ap.parse_args())
     if parsed.poses_from and parsed.rig_from:
         ap.error("--poses-from and --rig-from are mutually exclusive")
+    if parsed.registration_from and (parsed.deformable or parsed.rig_from):
+        ap.error("--registration-from cannot be combined with --deformable or --rig-from")
     return parsed

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from pathlib import Path
 from typing import Protocol, Sequence, cast
 
 import numpy as np
@@ -24,6 +25,7 @@ from ..registration_geometry import (
     triangulate_3d_feature_tracks,
 )
 from ..registration_export import build_surface_mesh
+from ..registration_checkpoint import save_registration
 from ..registration_surface import (
     Surface,
     TexParam,
@@ -84,6 +86,7 @@ class ReconstructionProblem(Protocol):
     rig_model: RigModel
     R0: RotationArray
     C0: CenterArray
+    registration: BundleAdjustmentResult | None
 
 
 class ReconstructionSolution(Protocol):
@@ -114,7 +117,7 @@ class ReconstructionSolution(Protocol):
 def reconstruct_surface_from_camera_frames(
     args: ReconstructionArgs, problem: ReconstructionProblem
 ) -> ReconstructionSolution:
-    """Run bundle adjustment, reject outliers, fit the surface, and render."""
+    """Run or reuse registration, then fit the existing surface and render."""
     output_directory = problem.out_dir
     frames = problem.frames
     pairs = problem.pairs
@@ -136,7 +139,10 @@ def reconstruct_surface_from_camera_frames(
             frame_group = {frame.idx: 2 * frame.col + (1 if frame.phase == "-x" else 0) for frame in frames}
         else:
             frame_group = {frame.idx: 2 * frame.row + (1 if frame.phase == "-y" else 0) for frame in frames}
-    if frame_group is not None and args.group_ba == "group":
+    if problem.registration is not None:
+        print("[6/9] using saved registration; pose refinement skipped")
+        bundle_adjustment_result = problem.registration
+    elif frame_group is not None and args.group_ba == "group":
         if not args.rig_from:
             print(
                 "      ! --group-by-row is best with --rig-from (a single row "
@@ -176,7 +182,7 @@ def reconstruct_surface_from_camera_frames(
     # re-triangulate_3d_feature_tracks the surviving landmarks from the trustworthy rays only --
     # otherwise a couple of bad frames bend the subject surface into a spike
     # and smear the ortho-texture.
-    if args.reject_pose_mm > 0 or args.reject_rot_deg > 0:
+    if problem.registration is None and (args.reject_pose_mm > 0 or args.reject_rot_deg > 0):
         outlier_frame_mask: NDArray[np.bool_] = np.zeros(len(frames), bool)
         if args.reject_pose_mm > 0:
             outlier_frame_mask |= position_deviations_mm > args.reject_pose_mm
@@ -209,6 +215,11 @@ def reconstruct_surface_from_camera_frames(
 
     # standoff sensor agreement
     reprojection_errors, camera_depths = compute_feature_track_reprojection_errors(landmark_points, bundle_adjustment_result["obs_frame"], bundle_adjustment_result["obs_uv"], bundle_adjustment_result["obs_track"], camera_rotations, camera_centers, rig_model)
+    if problem.registration is None:
+        # Outlier rejection can change the observation arrays after BA.
+        saved_result = bundle_adjustment_result.copy()
+        saved_result["err"] = reprojection_errors
+        save_registration(Path(output_directory) / "registration.npz", frames, rig_model, saved_result)
     median_depth_by_frame: FloatArray = np.full(len(frames), np.nan)
     for frame in frames:
         mask = bundle_adjustment_result["obs_frame"] == frame.idx

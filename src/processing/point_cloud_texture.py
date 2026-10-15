@@ -1,9 +1,7 @@
-"""Photo texture on local 3D landmark triangles, without a global heightfield.
+"""Project every posed photo onto a shared, depth-tested 3D landmark surface.
 
-Each view triangulates only the landmarks it actually observes. Sensor samples
-are lifted onto these triangles using perspective-correct interpolation, then
-fused in world-space voxels. Geometry between landmarks is piecewise planar;
-this increases texture density, not the measured geometric detail.
+Matches establish geometry once. Photos can texture visible triangles without
+having observed their landmarks. Interpolation adds texture, not measured depth.
 """
 
 from __future__ import annotations
@@ -62,6 +60,13 @@ class ColoredPointCloud:
     points_mm: FloatArray  # (N, 3), processing's world gauge, millimetres
     colors_rgb: NDArray[np.uint8]  # (N, 3), display RGB
     weights: FloatArray  # (N,), border / centre / incidence preference
+    frame_indices: NDArray[np.int32]  # (N,), winning photo, including matchless views
+
+
+@dataclass(frozen=True)
+class LandmarkSurface:
+    vertices_mm: FloatArray  # (V,3), world millimetres
+    faces: NDArray[np.int32]  # (F,3), vertex indices
 
 
 def _fuse_voxels(
@@ -71,6 +76,7 @@ def _fuse_voxels(
     points = np.concatenate([cloud.points_mm for cloud in clouds])
     colors = np.concatenate([cloud.colors_rgb for cloud in clouds])
     weights = np.concatenate([cloud.weights for cloud in clouds])
+    frame_indices = np.concatenate([cloud.frame_indices for cloud in clouds])
     voxels = np.floor(points / options.point_pitch_mm).astype(np.int64)
     order = np.lexsort((-weights, voxels[:, 2], voxels[:, 1], voxels[:, 0]))
     sorted_voxels = voxels[order]
@@ -81,12 +87,80 @@ def _fuse_voxels(
             f"point cloud exceeds --max-points {options.max_points}; "
             "increase --point-pitch-mm or raise --max-points"
         )
-    return ColoredPointCloud(points[selected], colors[selected], weights[selected])
+    return ColoredPointCloud(points[selected], colors[selected], weights[selected], frame_indices[selected])
+
+
+def build_landmark_surface(
+    frames: Sequence[Frame], reconstruction: BundleAdjustmentResult,
+    options: PointCloudTextureOptions,
+) -> LandmarkSurface:
+    """Union the supported triangles from all views; do not flatten or bridge gaps."""
+    points = reconstruction["X"]
+    counts = np.bincount(reconstruction["obs_track"], minlength=len(points))
+    trusted = (np.isfinite(points).all(axis=1) & (counts >= 2)
+               & (reconstruction["track_err"] <= options.max_reprojection_px))
+    faces: list[NDArray[np.int32]] = []
+    for frame in frames:
+        observed = np.unique(reconstruction["obs_track"][reconstruction["obs_frame"] == frame.idx])
+        observed = observed[trusted[observed]]
+        camera = (points[observed] - reconstruction["C"][frame.idx]) @ reconstruction["R"][frame.idx]
+        observed, camera = observed[camera[:, 2] > 0], camera[camera[:, 2] > 0]
+        if len(observed) < 3:
+            continue
+        try:
+            triangles = Delaunay(camera[:, :2] / camera[:, 2:])
+        except QhullError:
+            continue
+        indices = observed[triangles.simplices]
+        vertices = points[indices]
+        edges = vertices - np.roll(vertices, 1, axis=1)
+        good = np.linalg.norm(edges, axis=2).max(axis=1) <= options.max_edge_mm
+        good &= np.linalg.norm(np.cross(edges[:, 0], edges[:, 1]), axis=1) > 1e-9
+        faces.append(np.asarray(indices[good], dtype=np.int32))
+    if not faces or not any(len(part) for part in faces):
+        raise ValueError("no supported 3D surface; check overlap, --max-edge-mm and --max-reprojection-px")
+    unique = np.unique(np.sort(np.concatenate(faces), axis=1), axis=0)
+    return LandmarkSurface(points, unique)
+
+
+def _visible_faces(
+    camera_vertices: FloatArray, faces: NDArray[np.int32],
+    fx: float, cx: float, cy: float, width: int, height: int, stride: int,
+) -> NDArray[np.int32]:
+    """Rasterize an undistorted sensor grid with perspective-correct z buffering."""
+    owners = np.full((math.ceil(height / stride), math.ceil(width / stride)), -1, np.int32)
+    depth = np.full(owners.shape, np.inf)
+    projected = fx * camera_vertices[:, :2] / np.maximum(camera_vertices[:, 2:], 1e-9)
+    projected = (projected + [cx, cy] - stride / 2) / stride
+    for face_index, face in enumerate(faces):
+        z = camera_vertices[face, 2]
+        if np.any(z <= 1e-6):
+            continue
+        triangle = projected[face]
+        x0, y0 = np.maximum(np.ceil(triangle.min(axis=0)), 0).astype(int)
+        x1, y1 = np.minimum(np.floor(triangle.max(axis=0)), np.array(owners.shape[::-1]) - 1).astype(int)
+        if x1 < x0 or y1 < y0:
+            continue
+        a, b, c = triangle
+        denominator = (b[1] - c[1]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[1] - c[1])
+        if abs(denominator) < 1e-12:
+            continue
+        yy, xx = np.ogrid[y0:y1 + 1, x0:x1 + 1]
+        u = ((b[1] - c[1]) * (xx - c[0]) + (c[0] - b[0]) * (yy - c[1])) / denominator
+        v = ((c[1] - a[1]) * (xx - c[0]) + (a[0] - c[0]) * (yy - c[1])) / denominator
+        w = 1 - u - v
+        inside = (u >= -1e-9) & (v >= -1e-9) & (w >= -1e-9)
+        candidate_depth = 1 / np.maximum(u / z[0] + v / z[1] + w / z[2], 1e-12)
+        region = depth[y0:y1 + 1, x0:x1 + 1]
+        closer = inside & (candidate_depth < region)
+        region[closer] = candidate_depth[closer]
+        owners[y0:y1 + 1, x0:x1 + 1][closer] = face_index
+    return owners
 
 
 def _sample_frame(
     frame: Frame,
-    points_mm: FloatArray,
+    surface: LandmarkSurface,
     rotation: FloatArray,
     center_mm: FloatArray,
     rig: RigModel,
@@ -100,54 +174,60 @@ def _sample_frame(
     fx, cx, cy = rig.fx * rig.downscale, rig.cx * rig.downscale, rig.cy * rig.downscale
     if abs(width - 2 * cx) > rig.downscale or abs(height - 2 * cy) > rig.downscale:
         raise ValueError(f"image dimensions differ from pose calibration: {frame.image_path}")
-    _, depths = project_world_points_into_camera(points_mm, rotation, center_mm, fx, rig.k1, cx, cy)
-    points_mm, depths = points_mm[depths > 0], depths[depths > 0]
-    if len(points_mm) < 3:
+    camera_points = (surface.vertices_mm - center_mm) @ rotation
+    depths = camera_points[np.unique(surface.faces), 2]
+    depths = depths[depths > 0]
+    if len(depths) == 0:
         return
-    camera_points = (points_mm - center_mm) @ rotation
-    normalized = camera_points[:, :2] / depths[:, None]
-    try:
-        triangulation = Delaunay(normalized)
-    except QhullError:
-        return  # too few noncollinear visible landmarks
-    vertices = points_mm[triangulation.simplices]
-    edges = vertices - np.roll(vertices, 1, axis=1)
-    valid_faces = np.linalg.norm(edges, axis=2).max(axis=1) <= options.max_edge_mm
+    vertices = surface.vertices_mm[surface.faces]
     normals = np.cross(vertices[:, 1] - vertices[:, 0], vertices[:, 2] - vertices[:, 0])
     normal_lengths = np.linalg.norm(normals, axis=1)
-    valid_faces &= normal_lengths > 1e-9
     normals /= np.maximum(normal_lengths[:, None], 1e-9)
-    if not valid_faces.any():
-        return
-
-    # Process a narrow strip at a time, even for full-resolution photographs.
     stride = max(1, int(fx * options.point_pitch_mm / float(np.median(depths))))
     if math.ceil(width / stride) * math.ceil(height / stride) > 4 * options.max_points:
         raise ValueError("frame sampling exceeds point budget; increase --point-pitch-mm")
     mask = (
         None if frame.mask_path is None else load_camera_frame_mask(frame.mask_path, width, height)
     )
-    xs = np.arange(stride // 2, width, stride, dtype=np.float64)
-    for row in range(stride // 2, height, 32 * stride):
-        ys = np.arange(row, min(row + 32 * stride, height), stride, dtype=np.float64)
-        pixel_x, pixel_y = np.meshgrid(xs, ys)
-        uv = np.stack([pixel_x.ravel(), pixel_y.ravel()], axis=1)
-        queries = undistort_image_points_to_normalized_camera(uv, fx, rig.k1, cx, cy)
-        simplex = triangulation.find_simplex(queries)
-        valid = (simplex >= 0) & valid_faces[np.maximum(simplex, 0)]
+    # Extend the undistorted sensor bounds so barrel distortion does not crop
+    # valid source pixels at the photo edges.
+    border = np.linspace(0, 1, 32)
+    perimeter = np.concatenate([
+        np.column_stack((border * width, np.zeros(32))),
+        np.column_stack((border * width, np.full(32, height))),
+        np.column_stack((np.zeros(32), border * height)),
+        np.column_stack((np.full(32, width), border * height)),
+    ])
+    undistorted = undistort_image_points_to_normalized_camera(perimeter, fx, rig.k1, cx, cy) * fx + [cx, cy]
+    origin = np.floor(undistorted.min(axis=0))
+    extent = np.ceil(undistorted.max(axis=0) - origin).astype(int)
+    if math.ceil(extent[0] / stride) * math.ceil(extent[1] / stride) > 4 * options.max_points:
+        raise ValueError("undistorted frame exceeds point budget; increase --point-pitch-mm")
+    ownership = _visible_faces(camera_points, surface.faces, fx, cx - origin[0], cy - origin[1],
+                               int(extent[0]), int(extent[1]), stride)
+    camera_triangles = camera_points[surface.faces]
+    for row in range(0, ownership.shape[0], 32):
+        block = ownership[row:row + 32]
+        yy, xx = np.nonzero(block >= 0)
+        if not len(xx):
+            continue
+        simplex = block[yy, xx]
+        queries = (np.column_stack((xx, yy + row)) * stride + stride / 2 + origin - [cx, cy]) / fx
+        triangles = camera_triangles[simplex]
+        # A ray intersects the selected triangle's plane. The z buffer has
+        # already discarded all farther triangles at the same ray.
+        camera_normals = np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0])
+        rays = np.column_stack((queries, np.ones(len(queries))))
+        ray_depth = np.sum(camera_normals * triangles[:, 0], axis=1) / np.sum(camera_normals * rays, axis=1)
+        points = (rays * ray_depth[:, None]) @ rotation.T + center_mm
+        uv, _ = project_world_points_into_camera(points, rotation, center_mm, fx, rig.k1, cx, cy)
+        valid = (uv[:, 0] >= 0) & (uv[:, 0] < width - 1) & (uv[:, 1] >= 0) & (uv[:, 1] < height - 1)
         if mask is not None:
-            valid &= mask[uv[:, 1].astype(int), uv[:, 0].astype(int)] > 0.5
+            valid &= mask[np.clip(np.rint(uv[:, 1]).astype(int), 0, height - 1),
+                          np.clip(np.rint(uv[:, 0]).astype(int), 0, width - 1)] > 0.5
         if not valid.any():
             continue
-        uv, queries, simplex = uv[valid], queries[valid], simplex[valid]
-        transforms = triangulation.transform[simplex]
-        barycentric_xy = np.einsum("nij,nj->ni", transforms[:, :2], queries - transforms[:, 2])
-        barycentric = np.c_[barycentric_xy, 1 - barycentric_xy.sum(axis=1)]
-        # Image-space barycentric coordinates interpolate reciprocal depth.
-        corners = triangulation.simplices[simplex]
-        perspective = barycentric / depths[corners]
-        perspective /= perspective.sum(axis=1, keepdims=True)
-        points = np.einsum("ni,nij->nj", perspective, points_mm[corners])
+        uv, points, simplex = uv[valid], points[valid], simplex[valid]
         feather, preference = camera_frame_texture_weights(
             uv, width, height, options.blend_sharpness
         )
@@ -177,7 +257,8 @@ def _sample_frame(
                 color, mapx[start:stop], mapy[start:stop], width, height, gain
             )
             rgb = np.clip(np.rint(color[:, 0, ::-1]), 0, 255).astype(np.uint8)
-            yield ColoredPointCloud(points[start:stop], rgb, weights[start:stop])
+            yield ColoredPointCloud(points[start:stop], rgb, weights[start:stop],
+                                    np.full(len(rgb), frame.idx, np.int32))
 
 
 def render_point_cloud_texture(
@@ -187,24 +268,15 @@ def render_point_cloud_texture(
     options: PointCloudTextureOptions,
     frame_gains: NDArray[np.float32] | None = None,
 ) -> ColoredPointCloud:
-    """Texture locally supported 3D patches, preserving folds and separate sides."""
-    points = reconstruction["X"]
-    counts = np.bincount(reconstruction["obs_track"], minlength=len(points))
-    trusted = (
-        np.isfinite(points).all(axis=1)
-        & (counts >= 2)
-        & (reconstruction["track_err"] <= options.max_reprojection_px)
-    )
+    """Texture the shared surface from every photo, independent of its matches."""
+    surface = build_landmark_surface(frames, reconstruction, options)
+    print(f"      shared surface: {len(surface.faces)} supported triangles")
     cloud: ColoredPointCloud | None = None
     for frame in frames:
-        observed = np.unique(reconstruction["obs_track"][reconstruction["obs_frame"] == frame.idx])
-        observed = observed[trusted[observed]]
-        if len(observed) < 3:
-            continue
         patches = list(
             _sample_frame(
                 frame,
-                points[observed],
+                surface,
                 reconstruction["R"][frame.idx],
                 reconstruction["C"][frame.idx],
                 rig,

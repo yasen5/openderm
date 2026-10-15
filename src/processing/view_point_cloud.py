@@ -1,4 +1,4 @@
-"""Serve an exported RGB point cloud on localhost for viewing through SSH.
+"""Serve a textured surface viewer or RGB point cloud on localhost through SSH.
 
     python -m processing.view_point_cloud captures/cleaner-texture3d --port 8765
 
@@ -97,7 +97,7 @@ class PointCloudHandler(BaseHTTPRequestHandler):
         server: BaseServer,
         *,
         files: dict[str, Path],
-        info: CloudInfo,
+        info: CloudInfo | None,
     ) -> None:
         self.files = files
         self.info = info
@@ -111,7 +111,7 @@ class PointCloudHandler(BaseHTTPRequestHandler):
 
     def _respond(self, *, send_body: bool) -> None:
         route = urlsplit(self.path).path
-        if route == "/info.json":
+        if route == "/info.json" and self.info is not None:
             body = json.dumps(self.info).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -152,6 +152,12 @@ class PointCloudHandler(BaseHTTPRequestHandler):
 def create_viewer_server(
     source: Path, host: str = "127.0.0.1", port: int = 8765
 ) -> ThreadingHTTPServer:
+    viewer = source / "viewer.html" if source.is_dir() else source
+    if viewer.name == "viewer.html" and viewer.is_file():
+        # Surface exports embed mesh, texture, cameras and vendored Three.js.
+        return ThreadingHTTPServer(
+            (host, port), partial(PointCloudHandler, files={"/": viewer}, info=None)
+        )
     cloud = source / "texture.ply" if source.is_dir() else source
     info = inspect_point_cloud(cloud)
     libraries = threejs_directory()
@@ -168,7 +174,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("source", type=Path, help="texture3d output directory or texture.ply")
+    parser.add_argument("source", type=Path, help="output directory, viewer.html, or texture.ply")
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args(argv)
     if not 1 <= args.port <= 65535:

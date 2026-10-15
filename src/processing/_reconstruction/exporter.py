@@ -130,9 +130,11 @@ class TexturePlacement(TypedDict):
 class PlacementsDocument(TypedDict):
     capture_dir: str
     downscale: int
+    registration_from: str | None
     # "gantry": poses derive from rig_model + sidecar proprioception.
     # "external": --poses-from; rig_model.{lever_mm,Rm,rx_sign,dz0_mm} are
     # placeholders and each frame's R_cam2world/C_mm are authoritative.
+    # "checkpoint": saved refined poses; prior deviations refer to that cache.
     pose_source: str
     rig_model: RigPlacement
     ba: BundleAdjustmentPlacement
@@ -197,7 +199,10 @@ def export_scan_reconstruction_artifacts(
     placements: PlacementsDocument = PlacementsDocument(
         capture_dir=args.capture_dir,
         downscale=args.downscale,
-        pose_source="external" if rig_model.fixed_poses is not None else "gantry",
+        registration_from=args.registration_from,
+        pose_source="checkpoint" if args.registration_from else (
+            "external" if rig_model.fixed_poses is not None else "gantry"
+        ),
         rig_model=RigPlacement(
             fx_ds_px=rig_model.fx,
             fx_fullres_px=rig_model.fx * args.downscale,
@@ -268,6 +273,9 @@ def export_scan_reconstruction_artifacts(
     pxmm_full = rig_model.fx * args.downscale / np.mean([rig_model.depth(frame) for frame in frames])
     with open(os.path.join(out_dir, "report.txt"), "w") as fh:
         fh.write(f"3D registration report for {args.capture_dir}\n")
+        if args.registration_from:
+            fh.write(f"registration reused from: {args.registration_from}\n")
+            fh.write("matching, refinement and pose rejection skipped; deviations reference saved poses\n")
         fh.write(
             f"frames: {len(frames)}  pairs: {len(pairs)}  "
             f"landmarks: {len(landmark_points)}  obs: {len(bundle_adjustment_result['obs_uv'])}\n\n"
@@ -281,7 +289,7 @@ def export_scan_reconstruction_artifacts(
         fh.write(f"BA rms history: {' -> '.join(f'{image_height:.2f}' for image_height in bundle_adjustment_result['history'])}\n")
         fh.write(f"surface fit rms (landmark->surface):  {surf_rms:.3f} mm\n")
         fh.write(
-            f"pose deviation from proprioception:   |dt| median "
+            f"pose deviation from {'checkpoint' if args.registration_from else 'prior'}:   |dt| median "
             f"{np.median(dt):.2f} / max {dt.max():.2f} mm, |dr| median "
             f"{np.median(dr):.2f} / max {dr.max():.2f} deg\n"
         )

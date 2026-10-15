@@ -9,6 +9,7 @@ import pickle
 import sys
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol, TypedDict, cast
 
 import numpy as np
@@ -27,12 +28,14 @@ from ..registration_features import (
 )
 from ..external_poses import load_external_poses
 from ..registration_geometry import (
+    BundleAdjustmentResult,
     RigModel,
     find_overlapping_frame_pairs,
     predict_frame_pair_translation,
     estimate_initial_rig_camera_model,
     verify_pair_with_known_poses,
 )
+from ..registration_checkpoint import load_registration
 from .parser import CameraRegistrationArguments
 
 
@@ -97,19 +100,11 @@ class ReconstructionProblem:
     prefit_rms: float
     R0: NDArray[np.float64]
     C0: NDArray[np.float64]
+    registration: BundleAdjustmentResult | None = None
 
 
-def build_scan_reconstruction_problem(
-    args: CameraRegistrationArguments, mem_cap: int | None = None, *, spatial_overlap: bool = False
-) -> ReconstructionProblem:
-    """Load captures, match features, and establish the rig prior."""
-    out_dir = args.out or os.path.join(args.capture_dir, "registration3d")
-    os.makedirs(out_dir, exist_ok=True)
-    if mem_cap:
-        print(
-            f"      RAM guard: data segment capped at {mem_cap / 1e9:.1f} GB "
-            "(MemoryError here beats the kernel OOM killer there)"
-        )
+def load_reconstruction_frames(args: CameraRegistrationArguments) -> tuple[list[Frame], str]:
+    """Load selected photos/masks and their mask cache token, without registration."""
     row_range: tuple[int, int] | None = None
     station_range: tuple[int, int] | None = None
     col_range: tuple[int, int] | None = None
@@ -136,6 +131,31 @@ def build_scan_reconstruction_problem(
     mask_cache_token = attach_frame_masks(frames, args.mask_dir) if args.mask_dir else ""
     if args.mask_dir:
         print(f"      masks: {len(frames)} frames restricted to {args.mask_dir}")
+    return frames, mask_cache_token
+
+
+def build_scan_reconstruction_problem(
+    args: CameraRegistrationArguments, mem_cap: int | None = None, *, spatial_overlap: bool = False
+) -> ReconstructionProblem:
+    """Load captures, match features, and establish the rig prior."""
+    out_dir = args.out or os.path.join(args.capture_dir, "registration3d")
+    os.makedirs(out_dir, exist_ok=True)
+    if mem_cap:
+        print(
+            f"      RAM guard: data segment capped at {mem_cap / 1e9:.1f} GB "
+            "(MemoryError here beats the kernel OOM killer there)"
+        )
+    frames, mask_cache_token = load_reconstruction_frames(args)
+
+    if args.registration_from:
+        rig, registration = load_registration(Path(args.registration_from), frames)
+        args.downscale = rig.downscale
+        for frame in frames:
+            frame.shape = (round(2 * rig.cy), round(2 * rig.cx))
+        print(f"      loaded {args.registration_from}; feature extraction and matching skipped")
+        return ReconstructionProblem(
+            out_dir, frames, [], rig, float("nan"), registration["R"], registration["C"], registration
+        )
 
     # Features and matches are computed in the sensor frame with EXIF
     # orientation ignored.

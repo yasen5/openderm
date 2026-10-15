@@ -9,7 +9,6 @@ without importing their implementation details.
 
 from __future__ import annotations
 
-import argparse
 import sys
 
 from ._reconstruction.exporter import export_scan_reconstruction_artifacts
@@ -37,7 +36,7 @@ def main() -> None:
 
 
 def _main(mem_cap: int | None = None) -> None:
-    args: argparse.Namespace = parse_scan_cli_arguments()
+    args = parse_scan_cli_arguments()
     problem = build_scan_reconstruction_problem(args, mem_cap)
     solution = reconstruct_surface_from_camera_frames(args, problem)
     export_scan_reconstruction_artifacts(args, problem, solution)
